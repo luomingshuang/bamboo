@@ -4,15 +4,15 @@ from pathlib import Path
 
 from setuptools import find_packages, setup
 
-icefall_dir = Path(__file__).parent
-install_requires = (icefall_dir / "requirements.txt").read_text().splitlines()
+bamboo_dir = Path(__file__).parent
+install_requires = (bamboo_dir / "requirements.txt").read_text().splitlines()
 
 setup(
-    name="icefall",
+    name="bamboo",
     version="1.0",
     python_requires=">=3.6.0",
-    description="Speech processing recipes using k2 and Lhotse.",
-    author="The k2 and Lhotse Development Team",
+    description="Some Interesting Algorithms For Computer Vision.",
+    author="Mingshuang Luo",
     license="Apache-2.0 License",
     packages=find_packages(),
     install_requires=install_requires,
