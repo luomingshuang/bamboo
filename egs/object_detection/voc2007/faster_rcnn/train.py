@@ -37,10 +37,10 @@ from icefall.dist import cleanup_dist, setup_dist
 from icefall.env import get_env_info
 from icefall.utils import (
     AttributeDict,
-    #MetricsTracker,
     setup_logger,
     str2bool,
 )
+
 from local.utils import MetricsTracker
 
 from local.utils import get_classes
@@ -112,6 +112,13 @@ def get_parser():
         type=str2bool,
         default=True,
         help="Should various information be logged in tensorboard.",
+    )
+
+    parser.add_argument(
+        "--wandb",
+        type=str2bool,
+        default=True,
+        help="Should various information be logged in wandb.",
     )
 
     parser.add_argument(
@@ -253,7 +260,6 @@ def get_params() -> AttributeDict:
             "reset_interval": 200,
             "valid_interval": 1000,
             "save_checkpoint_interval": 5,
-            "beam_size": 10,
             "reduction": "sum",
             "use_double_scores": True,
 
@@ -427,13 +433,13 @@ def compute_validation_loss(
     tot_loss = MetricsTracker()
 
     for batch_idx, batch in enumerate(valid_dl):
-        loss, loss_info = compute_loss(
+        losses, loss_info = compute_loss(
             params=params,
             model=model,
             batch=batch,
             is_training=False,
         )
-        assert loss.requires_grad is False
+        assert losses[-1].requires_grad is False
 
         tot_loss = tot_loss + loss_info
 
@@ -486,7 +492,7 @@ def train_one_epoch(
 
     for batch_idx, batch in enumerate(train_dl):
         params.batch_idx_train += 1
-        batch_size = len(batch)
+        batch_size = len(batch[0])
 
         losses, loss_info = compute_loss(
             params=params,
@@ -602,8 +608,8 @@ def run(rank, world_size, args):
         #------------------------------------------------------#
         #   显示没有匹配上的Key
         #------------------------------------------------------#
-        print("\nSuccessful Load Key:", str(load_key)[:500], "……\nSuccessful Load Key Num:", len(load_key))
-        print("\nFail To Load Key:", str(no_load_key)[:500], "……\nFail To Load Key num:", len(no_load_key))
+        print("\nSuccessful Load Key:", str(load_key), "\nSuccessful Load Key Num:", len(load_key))
+        print("\nFail To Load Key:", str(no_load_key), "\nFail To Load Key num:", len(no_load_key))
 
     checkpoints = load_checkpoint_if_available(params=params, model=model)
 

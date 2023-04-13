@@ -66,11 +66,6 @@ class MetricsTracker(collections.defaultdict):
                     ans_utterances += ", "
                 else:
                     raise ValueError(f"Unexpected key: {k}")
-        frames = "%.2f" % self["frames"]
-        ans_frames += "over " + str(frames) + " frames. "
-        if ans_utterances != "":
-            utterances = "%.2f" % self["utterances"]
-            ans_utterances += "over " + str(utterances) + " utterances."
 
         return ans_frames + ans_utterances
 
@@ -86,7 +81,7 @@ class MetricsTracker(collections.defaultdict):
             if k == "frames" or k == "utterances":
                 continue
             norm_value = (
-                float(v) / num_frames if "utt_" not in k else float(v) / num_utterances
+                float(v) / 1 if "utt_" not in k else float(v) / num_utterances
             )
             ans.append((k, norm_value))
         return ans
