@@ -80,15 +80,15 @@ fi
 
 if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
   log "Stage 1: Prepare train and val data"
-  data_dir=/userhome/data/voc_2007_2012
+  data_dir=/home/bcxiong1/data/voc
   out_dir=data/voc2007
   year=2007
   
   mkdir -p $out_dir
 
   python ./local/voc_annotation.py \
-   --data-dir /userhome/data/voc_2007_2012 \
-   --out-dir data/voc2007 \
+   --data-dir $data_dir \
+   --out-dir $out_dir \
    --class-txt $dl_dir/voc2007_model_data/voc_classes.txt \
    --year 2007 \
    --trainval-percent 0.9 \
