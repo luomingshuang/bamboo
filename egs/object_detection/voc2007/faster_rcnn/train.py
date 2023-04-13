@@ -363,7 +363,7 @@ def save_checkpoint(
         return
     filename = Path(params.exp_dir) / f"epoch-{params.cur_epoch}.pt"
 
-    if params.cur_epoch % params.save_checkpoint_interval == 0:
+    if params.cur_epoch % params.save_checkpoint_interval == 0 or params.start_epoch != 0:
         save_checkpoint_impl(
             filename=filename,
             model=model,
@@ -733,7 +733,7 @@ def run(rank, world_size, args):
             )
             tb_writer.add_scalar("train/epoch", epoch, params.batch_idx_train)
 
-        if wandb:
+        if params.wandb:
             wandb.log({"train_lr": scheduler.get_last_lr()[0]}, params.batch_idx_train)
             wandb.log({"train_epoch": epoch}, params.batch_idx_train)
 
