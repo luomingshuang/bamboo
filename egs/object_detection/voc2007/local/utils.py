@@ -28,6 +28,7 @@ import collections
 import torch
 import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
+import wandb
 
 class MetricsTracker(collections.defaultdict):
     def __init__(self):
@@ -113,4 +114,21 @@ class MetricsTracker(collections.defaultdict):
         """
         for k, v in self.norm_items():
             tb_writer.add_scalar(prefix + k, v, batch_idx)
+
+    def write_wandb(
+        self,
+        wd_writer: wandb,
+        prefix: str,
+        batch_idx: int,
+    ) -> None:
+        """Add logging information to a wandb writer.
+
+        Args:
+            wd_writer: a wandb writer
+            prefix: a prefix for the name of the loss, e.g. "train/valid_",
+                or "train/current_"
+            batch_idx: The current batch index, used as the x-axis of the plot.
+        """
+        for k, v in self.norm_items():
+            wandb.log({str(prefix + k): v}, batch_idx)
 

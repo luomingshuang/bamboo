@@ -42,9 +42,9 @@ from icefall.utils import (
 )
 
 from local.utils import MetricsTracker
-
 from local.utils import get_classes
 from local.dataset_voc2007 import VOC2007Dataset, frcnn_dataset_collate
+
 from model import FasterRCNN
 from nets.frcnn_training import (
     FasterRCNNTrainer, 
@@ -52,6 +52,9 @@ from nets.frcnn_training import (
     set_optimizer_lr, 
     weights_init,
 )
+
+import wandb
+wandb.login()
 
 import argparse
 import logging
@@ -101,6 +104,13 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--exp-dir",
+        type=str,
+        default="faster_rcnn/exp",
+        help="Path for the pretrained model weights file, eg: epoch-0.pt.",
+    )
+
+    parser.add_argument(
         "--master-port",
         type=int,
         default=12354,
@@ -117,7 +127,7 @@ def get_parser():
     parser.add_argument(
         "--wandb",
         type=str2bool,
-        default=True,
+        default=False,
         help="Should various information be logged in wandb.",
     )
 
@@ -247,7 +257,6 @@ def get_params() -> AttributeDict:
     """
     params = AttributeDict(
         {
-            "exp_dir": Path("faster_rcnn/exp"),
             "data_dir": Path("data/voc2007"),
             "lr": 1e-4,
             "weight_decay": 5e-4,
@@ -258,7 +267,7 @@ def get_params() -> AttributeDict:
             "batch_idx_train": 0,
             "log_interval": 10,
             "reset_interval": 200,
-            "valid_interval": 1000,
+            "valid_interval": 300,
             "save_checkpoint_interval": 5,
             "reduction": "sum",
             "use_double_scores": True,
@@ -314,7 +323,7 @@ def load_checkpoint_if_available(
     if params.start_epoch <= 0:
         return
 
-    filename = params.exp_dir / f"epoch-{params.start_epoch-1}.pt"
+    filename = Path(params.exp_dir) / f"epoch-{params.start_epoch-1}.pt"
     saved_params = load_checkpoint(
         filename,
         model=model,
@@ -352,7 +361,7 @@ def save_checkpoint(
     """
     if rank != 0:
         return
-    filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
+    filename = Path(params.exp_dir) / f"epoch-{params.cur_epoch}.pt"
 
     if params.cur_epoch % params.save_checkpoint_interval == 0:
         save_checkpoint_impl(
@@ -365,11 +374,11 @@ def save_checkpoint(
         )
 
     if params.best_train_epoch == params.cur_epoch:
-        best_train_filename = params.exp_dir / "best-train-loss.pt"
+        best_train_filename = Path(params.exp_dir) / "best-train-loss.pt"
         copyfile(src=filename, dst=best_train_filename)
 
     if params.best_valid_epoch == params.cur_epoch:
-        best_valid_filename = params.exp_dir / "best-valid-loss.pt"
+        best_valid_filename = Path(params.exp_dir) / "best-valid-loss.pt"
         copyfile(src=filename, dst=best_valid_filename)
 
 
@@ -444,7 +453,7 @@ def compute_validation_loss(
         tot_loss = tot_loss + loss_info
 
     if world_size > 1:
-        tot_loss.reduce(loss.device)
+        tot_loss.reduce(losses.device)
 
     loss_value = tot_loss["total_sum_loss"]
 
@@ -462,6 +471,7 @@ def train_one_epoch(
     train_dl: torch.utils.data.DataLoader,
     valid_dl: torch.utils.data.DataLoader,
     tb_writer: Optional[SummaryWriter] = None,
+    wd_writer: Optional[SummaryWriter] = None,
     world_size: int = 1,
 ) -> None:
     """Train the model for one epoch.
@@ -483,6 +493,8 @@ def train_one_epoch(
         Dataloader for the validation dataset.
       tb_writer:
         Writer to write log messages to tensorboard.
+      wd_writer:
+        Writer to write log messages to wandb.
       world_size:
         Number of nodes in DDP training. If it is 1, DDP is disabled.
     """
@@ -523,6 +535,14 @@ def train_one_epoch(
                     tb_writer, "train/current_", params.batch_idx_train
                 )
                 tot_loss.write_summary(tb_writer, "train/tot_", params.batch_idx_train)
+            
+            if wd_writer is not None:
+                loss_info.write_wandb(
+                    wd_writer, "train_current_", params.batch_idx_train
+                )
+                tot_loss.write_wandb(
+                    wd_writer, "train_tot_", params.batch_idx_train
+                )
 
         if batch_idx > 0 and batch_idx % params.valid_interval == 0:
             valid_info = compute_validation_loss(
@@ -537,6 +557,13 @@ def train_one_epoch(
                 valid_info.write_summary(
                     tb_writer,
                     "train/valid_",
+                    params.batch_idx_train,
+                )
+
+            if wd_writer is not None:
+                valid_info.write_wandb(
+                    wd_writer,
+                    "train_valid_",
                     params.batch_idx_train,
                 )
 
@@ -566,14 +593,33 @@ def run(rank, world_size, args):
     if world_size > 1:
         setup_dist(rank, world_size, params.master_port)
 
-    setup_logger(f"{params.exp_dir}/log/log-train")
+    setup_logger(f"{Path(params.exp_dir)}/log/log-train")
     logging.info("Training started")
     logging.info(params)
 
     if args.tensorboard and rank == 0:
-        tb_writer = SummaryWriter(log_dir=f"{params.exp_dir}/tensorboard")
+        tb_writer = SummaryWriter(log_dir=f"{Path(params.exp_dir)}/tensorboard")
     else:
         tb_writer = None
+
+    if args.wandb:
+        wandb_writer = wandb.init(
+            project="faster_rcnn_voc2007",
+            entity="luomingshuang",
+            job_type="training",
+            config={
+                "pretrained": params.pretrained,
+                "init_lr": params.lr,
+                "freeze_train": params.freeze_train,
+                "freeze_epoch": params.freeze_epoch,
+                "freeze_batch_size": params.freeze_batch_size,
+                "unfreeze_epoch": params.unfreeze_epoch,
+                "start_epoch": params.start_epoch,
+                "backbone": params.backbone,
+            }
+            )
+    else:
+        wandb_writer = None
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
@@ -614,6 +660,13 @@ def run(rank, world_size, args):
     checkpoints = load_checkpoint_if_available(params=params, model=model)
 
     model.to(device)
+
+    if params.freeze_train:
+        for param in model.extractor.parameters():
+            param.requires_grad = False
+
+    model.freeze_bn()
+
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
 
@@ -639,15 +692,36 @@ def run(rank, world_size, args):
     batch_size = params.freeze_batch_size if params.freeze_train else params.unfreeze_batch_size
 
     train_dataset = VOC2007Dataset(train_lines, params.input_shape, train = True)
-    valid_dataset   = VOC2007Dataset(val_lines, params.input_shape, train = False)
+    valid_dataset = VOC2007Dataset(val_lines, params.input_shape, train = False)
 
     train_dl = DataLoader(train_dataset, shuffle = True, batch_size = batch_size, num_workers = params.num_workers, pin_memory=True,
                                     drop_last=True, collate_fn=frcnn_dataset_collate)
-    valid_dl = DataLoader(valid_dataset  , shuffle = True, batch_size = batch_size, num_workers = params.num_workers, pin_memory=True, 
+    valid_dl = DataLoader(valid_dataset, shuffle = True, batch_size = batch_size, num_workers = params.num_workers, pin_memory=True, 
                                     drop_last=True, collate_fn=frcnn_dataset_collate)
 
     for epoch in range(params.start_epoch, params.num_epochs):
+        
+        if epoch >= params.freeze_epoch and params.freeze_train:
+            batch_size = params.unfreeze_batch_size
 
+            for param in model.extractor.parameters():
+                param.requires_grad = True
+
+            model.freeze_bn()
+
+            params.lr = 1e-5
+
+            optimizer = optim.AdamW(
+                model.parameters(),
+                lr=params.lr,
+                weight_decay=params.weight_decay,
+            )
+
+            train_dl = DataLoader(train_dataset, shuffle = True, batch_size = batch_size, num_workers = params.num_workers, pin_memory=True,
+                                    drop_last=True, collate_fn=frcnn_dataset_collate)
+            valid_dl = DataLoader(valid_dataset, shuffle = True, batch_size = batch_size, num_workers = params.num_workers, pin_memory=True, 
+                                    drop_last=True, collate_fn=frcnn_dataset_collate)
+        
         if epoch > params.start_epoch:
             logging.info(f"epoch {epoch}, lr: {scheduler.get_last_lr()[0]}")
 
@@ -659,6 +733,10 @@ def run(rank, world_size, args):
             )
             tb_writer.add_scalar("train/epoch", epoch, params.batch_idx_train)
 
+        if wandb:
+            wandb.log({"train_lr": scheduler.get_last_lr()[0]}, params.batch_idx_train)
+            wandb.log({"train_epoch": epoch}, params.batch_idx_train)
+
         params.cur_epoch = epoch
 
         train_one_epoch(
@@ -668,6 +746,7 @@ def run(rank, world_size, args):
             train_dl=train_dl,
             valid_dl=valid_dl,
             tb_writer=tb_writer,
+            wd_writer=wandb_writer,
             world_size=world_size,
         )
 
