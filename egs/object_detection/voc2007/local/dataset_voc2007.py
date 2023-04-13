@@ -4,10 +4,10 @@ import torch
 from PIL import Image
 from torch.utils.data.dataset import Dataset
 
-from cvtransforms import cvtColor, preprocess_input
+from .cvtransforms import cvtColor, preprocess_input
 
 
-class FRCNNDataset(Dataset):
+class VOC2007Dataset(Dataset):
     def __init__(self, annotation_lines, input_shape = [600, 600], train = True):
         self.annotation_lines   = annotation_lines
         self.length             = len(annotation_lines)

@@ -203,7 +203,7 @@ class ProposalTargetCreator(object):
         return sample_roi, gt_roi_loc, gt_roi_label
 
 class FasterRCNNTrainer(nn.Module):
-    def __init__(self, model_train, optimizer):
+    def __init__(self, model_train, optimizer=None):
         super(FasterRCNNTrainer, self).__init__()
         self.model_train    = model_train
         self.optimizer      = optimizer
@@ -312,28 +312,28 @@ class FasterRCNNTrainer(nn.Module):
             roi_cls_loss_all += roi_cls_loss
             
         losses = [rpn_loc_loss_all/n, rpn_cls_loss_all/n, roi_loc_loss_all/n, roi_cls_loss_all/n]
-        losses = losses + [sum(losses)]
+        # losses = losses + [sum(losses)]
         return losses
 
-    def train_step(self, imgs, bboxes, labels, scale, fp16=False, scaler=None):
-        self.optimizer.zero_grad()
-        if not fp16:
-            losses = self.forward(imgs, bboxes, labels, scale)
-            losses[-1].backward()
-            self.optimizer.step()
-        else:
-            from torch.cuda.amp import autocast
-            with autocast():
-                losses = self.forward(imgs, bboxes, labels, scale)
+    # def train_step(self, imgs, bboxes, labels, scale, fp16=False, scaler=None):
+    #     self.optimizer.zero_grad()
+    #     if not fp16:
+    #         losses = self.forward(imgs, bboxes, labels, scale)
+    #         losses[-1].backward()
+    #         self.optimizer.step()
+    #     else:
+    #         from torch.cuda.amp import autocast
+    #         with autocast():
+    #             losses = self.forward(imgs, bboxes, labels, scale)
 
-            #----------------------#
-            #   反向传播
-            #----------------------#
-            scaler.scale(losses[-1]).backward()
-            scaler.step(self.optimizer)
-            scaler.update()
+    #         #----------------------#
+    #         #   反向传播
+    #         #----------------------#
+    #         scaler.scale(losses[-1]).backward()
+    #         scaler.step(self.optimizer)
+    #         scaler.update()
             
-        return losses
+    #     return losses
 
 def weights_init(net, init_type='normal', init_gain=0.02):
     def init_func(m):

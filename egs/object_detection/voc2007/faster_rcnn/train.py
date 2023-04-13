@@ -1,252 +1,595 @@
-#-------------------------------------#
-#       对数据集进行训练
-#-------------------------------------#
-import os
-import datetime
+#!/usr/bin/env python3
+# Copyright      2023        (authors:   Mingshuang Luo)
+#
+# See ../../../../LICENSE for clarification regarding multiple authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
+"""
+Usage:
+  export CUDA_VISIBLE_DEVICES="0,1,2,3"
+  python faster_rcnn/train.py \
+     --world-size 4 \
+     --full-libri 1 \
+     --max-duration 300 \
+     --num-epochs 20
+"""
+
+import os
+cwd = os.getcwd()                  ## get the current path
+
+import sys
+sys.path.append(cwd)               ## add local to package 
+
+from icefall.checkpoint import load_checkpoint
+from icefall.checkpoint import save_checkpoint as save_checkpoint_impl
+from icefall.dist import cleanup_dist, setup_dist
+from icefall.env import get_env_info
+from icefall.utils import (
+    AttributeDict,
+    #MetricsTracker,
+    setup_logger,
+    str2bool,
+)
+from local.utils import MetricsTracker
+
+from local.utils import get_classes
+from local.dataset_voc2007 import VOC2007Dataset, frcnn_dataset_collate
+from model import FasterRCNN
+from nets.frcnn_training import (
+    FasterRCNNTrainer, 
+    get_lr_scheduler,
+    set_optimizer_lr, 
+    weights_init,
+)
+
+import argparse
+import logging
 import numpy as np
+from pathlib import Path
+from shutil import copyfile
+from typing import Optional, Tuple
+
 import torch
-import torch.backends.cudnn as cudnn
+import torch.multiprocessing as mp
+import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from nets.frcnn import FasterRCNN
-from nets.frcnn_training import (FasterRCNNTrainer, get_lr_scheduler,
-                                 set_optimizer_lr, weights_init)
-from utils.callbacks import EvalCallback, LossHistory
-from utils.dataloader import FRCNNDataset, frcnn_dataset_collate
-from utils.utils import get_classes, show_config
-from utils.utils_fit import fit_one_epoch
+from torch import Tensor
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn.utils import clip_grad_norm_
+from torch.optim.lr_scheduler import StepLR
+from torch.utils.tensorboard import SummaryWriter
 
-'''
-训练自己的目标检测模型一定需要注意以下几点：
-1、训练前仔细检查自己的格式是否满足要求，该库要求数据集格式为VOC格式，需要准备好的内容有输入图片和标签
-   输入图片为.jpg图片，无需固定大小，传入训练前会自动进行resize。
-   灰度图会自动转成RGB图片进行训练，无需自己修改。
-   输入图片如果后缀非jpg，需要自己批量转成jpg后再开始训练。
 
-   标签为.xml格式，文件中会有需要检测的目标信息，标签文件和输入图片文件相对应。
+def get_parser():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
 
-2、损失值的大小用于判断是否收敛，比较重要的是有收敛的趋势，即验证集损失不断下降，如果验证集损失基本上不改变的话，模型基本上就收敛了。
-   损失值的具体大小并没有什么意义，大和小只在于损失的计算方式，并不是接近于0才好。如果想要让损失好看点，可以直接到对应的损失函数里面除上10000。
-   训练过程中的损失值会保存在logs文件夹下的loss_%Y_%m_%d_%H_%M_%S文件夹中
-   
-3、训练好的权值文件保存在logs文件夹中，每个训练世代（Epoch）包含若干训练步长（Step），每个训练步长（Step）进行一次梯度下降。
-   如果只是训练了几个Step是不会保存的，Epoch和Step的概念要捋清楚一下。
-'''
-if __name__ == "__main__":
-    #-------------------------------#
-    #   是否使用Cuda
-    #   没有GPU可以设置成False
-    #-------------------------------#
-    Cuda            = True
-    #---------------------------------------------------------------------#
-    #   train_gpu   训练用到的GPU
-    #               默认为第一张卡、双卡为[0, 1]、三卡为[0, 1, 2]
-    #               在使用多GPU时，每个卡上的batch为总batch除以卡的数量。
-    #---------------------------------------------------------------------#
-    train_gpu       = [0,]
-    #---------------------------------------------------------------------#
-    #   fp16        是否使用混合精度训练
-    #               可减少约一半的显存、需要pytorch1.7.1以上
-    #---------------------------------------------------------------------#
-    fp16            = False
-    #---------------------------------------------------------------------#
-    #   classes_path    指向model_data下的txt，与自己训练的数据集相关 
-    #                   训练前一定要修改classes_path，使其对应自己的数据集
-    #---------------------------------------------------------------------#
-    classes_path    = 'model_data/voc_classes.txt'
-    #----------------------------------------------------------------------------------------------------------------------------#
-    #   权值文件的下载请看README，可以通过网盘下载。模型的 预训练权重 对不同数据集是通用的，因为特征是通用的。
-    #   模型的 预训练权重 比较重要的部分是 主干特征提取网络的权值部分，用于进行特征提取。
-    #   预训练权重对于99%的情况都必须要用，不用的话主干部分的权值太过随机，特征提取效果不明显，网络训练的结果也不会好
-    #
-    #   如果训练过程中存在中断训练的操作，可以将model_path设置成logs文件夹下的权值文件，将已经训练了一部分的权值再次载入。
-    #   同时修改下方的 冻结阶段 或者 解冻阶段 的参数，来保证模型epoch的连续性。
-    #   
-    #   当model_path = ''的时候不加载整个模型的权值。
-    #
-    #   此处使用的是整个模型的权重，因此是在train.py进行加载的，下面的pretrain不影响此处的权值加载。
-    #   如果想要让模型从主干的预训练权值开始训练，则设置model_path = ''，下面的pretrain = True，此时仅加载主干。
-    #   如果想要让模型从0开始训练，则设置model_path = ''，下面的pretrain = Fasle，Freeze_Train = Fasle，此时从0开始训练，且没有冻结主干的过程。
-    #   
-    #   一般来讲，网络从0开始的训练效果会很差，因为权值太过随机，特征提取效果不明显，因此非常、非常、非常不建议大家从0开始训练！
-    #   如果一定要从0开始，可以了解imagenet数据集，首先训练分类模型，获得网络的主干部分权值，分类模型的 主干部分 和该模型通用，基于此进行训练。
-    #----------------------------------------------------------------------------------------------------------------------------#
-    model_path      = 'model_data/voc_weights_resnet.pth'
-    #------------------------------------------------------#
-    #   input_shape     输入的shape大小
-    #------------------------------------------------------#
-    input_shape     = [600, 600]
-    #---------------------------------------------#
-    #   vgg
-    #   resnet50
-    #---------------------------------------------#
-    backbone        = "resnet50"
-    #----------------------------------------------------------------------------------------------------------------------------#
-    #   pretrained      是否使用主干网络的预训练权重，此处使用的是主干的权重，因此是在模型构建的时候进行加载的。
-    #                   如果设置了model_path，则主干的权值无需加载，pretrained的值无意义。
-    #                   如果不设置model_path，pretrained = True，此时仅加载主干开始训练。
-    #                   如果不设置model_path，pretrained = False，Freeze_Train = Fasle，此时从0开始训练，且没有冻结主干的过程。
-    #----------------------------------------------------------------------------------------------------------------------------#
-    pretrained      = False
-    #------------------------------------------------------------------------#
-    #   anchors_size用于设定先验框的大小，每个特征点均存在9个先验框。
-    #   anchors_size每个数对应3个先验框。
-    #   当anchors_size = [8, 16, 32]的时候，生成的先验框宽高约为：
-    #   [90, 180] ; [180, 360]; [360, 720]; [128, 128]; 
-    #   [256, 256]; [512, 512]; [180, 90] ; [360, 180]; 
-    #   [720, 360]; 详情查看anchors.py
-    #   如果想要检测小物体，可以减小anchors_size靠前的数。
-    #   比如设置anchors_size = [4, 16, 32]
-    #------------------------------------------------------------------------#
-    anchors_size    = [8, 16, 32]
+    parser.add_argument(
+        "--world-size",
+        type=int,
+        default=1,
+        help="Number of GPUs for DDP training.",
+    )
 
-    #----------------------------------------------------------------------------------------------------------------------------#
-    #   训练分为两个阶段，分别是冻结阶段和解冻阶段。设置冻结阶段是为了满足机器性能不足的同学的训练需求。
-    #   冻结训练需要的显存较小，显卡非常差的情况下，可设置Freeze_Epoch等于UnFreeze_Epoch，此时仅仅进行冻结训练。
-    #      
-    #   在此提供若干参数设置建议，各位训练者根据自己的需求进行灵活调整：
-    #   （一）从整个模型的预训练权重开始训练： 
-    #       Adam：
-    #           Init_Epoch = 0，Freeze_Epoch = 50，UnFreeze_Epoch = 100，Freeze_Train = True，optimizer_type = 'adam'，Init_lr = 1e-4。（冻结）
-    #           Init_Epoch = 0，UnFreeze_Epoch = 100，Freeze_Train = False，optimizer_type = 'adam'，Init_lr = 1e-4。（不冻结）
-    #       SGD：
-    #           Init_Epoch = 0，Freeze_Epoch = 50，UnFreeze_Epoch = 150，Freeze_Train = True，optimizer_type = 'sgd'，Init_lr = 1e-2。（冻结）
-    #           Init_Epoch = 0，UnFreeze_Epoch = 150，Freeze_Train = False，optimizer_type = 'sgd'，Init_lr = 1e-2。（不冻结）
-    #       其中：UnFreeze_Epoch可以在100-300之间调整。
-    #   （二）从主干网络的预训练权重开始训练：
-    #       Adam：
-    #           Init_Epoch = 0，Freeze_Epoch = 50，UnFreeze_Epoch = 100，Freeze_Train = True，optimizer_type = 'adam'，Init_lr = 1e-4。（冻结）
-    #           Init_Epoch = 0，UnFreeze_Epoch = 100，Freeze_Train = False，optimizer_type = 'adam'，Init_lr = 1e-4。（不冻结）
-    #       SGD：
-    #           Init_Epoch = 0，Freeze_Epoch = 50，UnFreeze_Epoch = 150，Freeze_Train = True，optimizer_type = 'sgd'，Init_lr = 1e-2。（冻结）
-    #           Init_Epoch = 0，UnFreeze_Epoch = 150，Freeze_Train = False，optimizer_type = 'sgd'，Init_lr = 1e-2。（不冻结）
-    #       其中：由于从主干网络的预训练权重开始训练，主干的权值不一定适合目标检测，需要更多的训练跳出局部最优解。
-    #             UnFreeze_Epoch可以在150-300之间调整，YOLOV5和YOLOX均推荐使用300。
-    #             Adam相较于SGD收敛的快一些。因此UnFreeze_Epoch理论上可以小一点，但依然推荐更多的Epoch。
-    #   （三）batch_size的设置：
-    #       在显卡能够接受的范围内，以大为好。显存不足与数据集大小无关，提示显存不足（OOM或者CUDA out of memory）请调小batch_size。
-    #       faster rcnn的Batch BatchNormalization层已经冻结，batch_size可以为1
-    #----------------------------------------------------------------------------------------------------------------------------#
-    #------------------------------------------------------------------#
-    #   冻结阶段训练参数
-    #   此时模型的主干被冻结了，特征提取网络不发生改变
-    #   占用的显存较小，仅对网络进行微调
-    #   Init_Epoch          模型当前开始的训练世代，其值可以大于Freeze_Epoch，如设置：
-    #                       Init_Epoch = 60、Freeze_Epoch = 50、UnFreeze_Epoch = 100
-    #                       会跳过冻结阶段，直接从60代开始，并调整对应的学习率。
-    #                       （断点续练时使用）
-    #   Freeze_Epoch        模型冻结训练的Freeze_Epoch
-    #                       (当Freeze_Train=False时失效)
-    #   Freeze_batch_size   模型冻结训练的batch_size
-    #                       (当Freeze_Train=False时失效)
-    #------------------------------------------------------------------#
-    Init_Epoch          = 0
-    Freeze_Epoch        = 50
-    Freeze_batch_size   = 4
-    #------------------------------------------------------------------#
-    #   解冻阶段训练参数
-    #   此时模型的主干不被冻结了，特征提取网络会发生改变
-    #   占用的显存较大，网络所有的参数都会发生改变
-    #   UnFreeze_Epoch          模型总共训练的epoch
-    #                           SGD需要更长的时间收敛，因此设置较大的UnFreeze_Epoch
-    #                           Adam可以使用相对较小的UnFreeze_Epoch
-    #   Unfreeze_batch_size     模型在解冻后的batch_size
-    #------------------------------------------------------------------#
-    UnFreeze_Epoch      = 100
-    Unfreeze_batch_size = 2
-    #------------------------------------------------------------------#
-    #   Freeze_Train    是否进行冻结训练
-    #                   默认先冻结主干训练后解冻训练。
-    #                   如果设置Freeze_Train=False，建议使用优化器为sgd
-    #------------------------------------------------------------------#
-    Freeze_Train        = True
-    
-    #------------------------------------------------------------------#
-    #   其它训练参数：学习率、优化器、学习率下降有关
-    #------------------------------------------------------------------#
-    #------------------------------------------------------------------#
-    #   Init_lr         模型的最大学习率
-    #                   当使用Adam优化器时建议设置  Init_lr=1e-4
-    #                   当使用SGD优化器时建议设置   Init_lr=1e-2
-    #   Min_lr          模型的最小学习率，默认为最大学习率的0.01
-    #------------------------------------------------------------------#
-    Init_lr             = 1e-4
-    Min_lr              = Init_lr * 0.01
-    #------------------------------------------------------------------#
-    #   optimizer_type  使用到的优化器种类，可选的有adam、sgd
-    #                   当使用Adam优化器时建议设置  Init_lr=1e-4
-    #                   当使用SGD优化器时建议设置   Init_lr=1e-2
-    #   momentum        优化器内部使用到的momentum参数
-    #   weight_decay    权值衰减，可防止过拟合
-    #                   adam会导致weight_decay错误，使用adam时建议设置为0。
-    #------------------------------------------------------------------#
-    optimizer_type      = "adam"
-    momentum            = 0.9
-    weight_decay        = 0
-    #------------------------------------------------------------------#
-    #   lr_decay_type   使用到的学习率下降方式，可选的有'step'、'cos'
-    #------------------------------------------------------------------#
-    lr_decay_type       = 'cos'
-    #------------------------------------------------------------------#
-    #   save_period     多少个epoch保存一次权值
-    #------------------------------------------------------------------#
-    save_period         = 5
-    #------------------------------------------------------------------#
-    #   save_dir        权值与日志文件保存的文件夹
-    #------------------------------------------------------------------#
-    save_dir            = 'logs'
-    #------------------------------------------------------------------#
-    #   eval_flag       是否在训练时进行评估，评估对象为验证集
-    #                   安装pycocotools库后，评估体验更佳。
-    #   eval_period     代表多少个epoch评估一次，不建议频繁的评估
-    #                   评估需要消耗较多的时间，频繁评估会导致训练非常慢
-    #   此处获得的mAP会与get_map.py获得的会有所不同，原因有二：
-    #   （一）此处获得的mAP为验证集的mAP。
-    #   （二）此处设置评估参数较为保守，目的是加快评估速度。
-    #------------------------------------------------------------------#
-    eval_flag           = True
-    eval_period         = 5
-    #------------------------------------------------------------------#
-    #   num_workers     用于设置是否使用多线程读取数据，1代表关闭多线程
-    #                   开启后会加快数据读取速度，但是会占用更多内存
-    #                   在IO为瓶颈的时候再开启多线程，即GPU运算速度远大于读取图片的速度。
-    #------------------------------------------------------------------#
-    num_workers         = 4
-    #----------------------------------------------------#
-    #   获得图片路径和标签
-    #----------------------------------------------------#
-    train_annotation_path   = '2007_train.txt'
-    val_annotation_path     = '2007_val.txt'
-    
-    #----------------------------------------------------#
-    #   获取classes和anchor
-    #----------------------------------------------------#
-    class_names, num_classes = get_classes(classes_path)
+    parser.add_argument(
+        "--backbone-weights-path",
+        type=str,
+        default="download/voc2007_model_data/voc_weights_backbone/voc_weights_resnet.pth",
+        help="Path for the pretrained backbone weights file.",
+        # When is "", the model doesn't load any pretrained backbone weights file.
+    )
 
-    #------------------------------------------------------#
-    #   设置用到的显卡
-    #------------------------------------------------------#
-    os.environ["CUDA_VISIBLE_DEVICES"]  = ','.join(str(x) for x in train_gpu)
-    ngpus_per_node                      = len(train_gpu)
-    print('Number of devices: {}'.format(ngpus_per_node))
-    
-    model = FasterRCNN(num_classes, anchor_scales = anchors_size, backbone = backbone, pretrained = pretrained)
-    if not pretrained:
-        weights_init(model)
-    if model_path != '':
-        #------------------------------------------------------#
-        #   权值文件请看README，百度网盘下载
-        #------------------------------------------------------#
-        print('Load weights {}.'.format(model_path))
+    parser.add_argument(
+        "--voc-classes-path",
+        type=str,
+        default="download/voc2007_model_data/voc_classes.txt",
+        help="Path for the voc_classes.txt file.",
+    )
+
+    parser.add_argument(
+        "--master-port",
+        type=int,
+        default=12354,
+        help="Master port to use for DDP training.",
+    )
+
+    parser.add_argument(
+        "--tensorboard",
+        type=str2bool,
+        default=True,
+        help="Should various information be logged in tensorboard.",
+    )
+
+    parser.add_argument(
+        "--num-epochs",
+        type=int,
+        default=100,
+        help="Number of epochs to train.",
+    )
+
+    parser.add_argument(
+        "--freeze-train",
+        type=bool,
+        default=True,
+        help="train the model by freezing the model firstly or not.",
+    )
+
+    parser.add_argument(
+        "--freeze-epoch",
+        type=int,
+        default=50,
+        help="the training epochs for freezing the backbone weights.",
+    )
+
+    parser.add_argument(
+        "--freeze-batch-size",
+        type=int,
+        default=4,
+        help="the batch size for training when freeze the backbone.",
+    )
+
+    parser.add_argument(
+        "--unfreeze-epoch",
+        type=int,
+        default=100,
+        help="the training epochs for training the whole model (including backbone).",
+    )
+
+    parser.add_argument(
+        "--unfreeze-batch-size",
+        type=int,
+        default=2,
+        help="the batch size for training when unfreeze the backbone.",
+    )
+
+    parser.add_argument(
+        "--start-epoch",
+        type=int,
+        default=0,
+        help="""Resume training from from this epoch.
+        If it is positive, it will load checkpoint from
+        tdnn_lstm_ctc/exp/epoch-{start_epoch-1}.pt
+        """,
+    )
+
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="""the number of workers for training.
+        """,
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="The seed for random generators intended for reproducibility",
+    )
+
+    return parser
+
+
+def get_params() -> AttributeDict:
+    """Return a dict containing training parameters.
+
+    All training related parameters that are not passed from the commandline
+    is saved in the variable `params`.
+
+    Commandline options are merged into `params` after they are parsed, so
+    you can also access them via `params`.
+
+    Explanation of options saved in `params`:
+
+        - exp_dir: It specifies the directory where all training related
+                   files, e.g., checkpoints, log, etc, are saved
+
+        - lang_dir: It contains language related input files such as
+                    "lexicon.txt"
+
+        - lr: It specifies the initial learning rate
+
+        - feature_dim: The model input dim. It has to match the one used
+                       in computing features.
+
+        - weight_decay:  The weight_decay for the optimizer.
+
+        - subsampling_factor:  The subsampling factor for the model.
+
+        - best_train_loss: Best training loss so far. It is used to select
+                           the model that has the lowest training loss. It is
+                           updated during the training.
+
+        - best_valid_loss: Best validation loss so far. It is used to select
+                           the model that has the lowest validation loss. It is
+                           updated during the training.
+
+        - best_train_epoch: It is the epoch that has the best training loss.
+
+        - best_valid_epoch: It is the epoch that has the best validation loss.
+
+        - batch_idx_train: Used to writing statistics to tensorboard. It
+                           contains number of batches trained so far across
+                           epochs.
+
+        - log_interval:  Print training loss if batch_idx % log_interval` is 0
+
+        - reset_interval: Reset statistics if batch_idx % reset_interval is 0
+
+        - valid_interval:  Run validation if batch_idx % valid_interval` is 0
+
+        - beam_size: It is used in k2.ctc_loss
+
+        - reduction: It is used in k2.ctc_loss
+
+        - use_double_scores: It is used in k2.ctc_loss
+    """
+    params = AttributeDict(
+        {
+            "exp_dir": Path("faster_rcnn/exp"),
+            "data_dir": Path("data/voc2007"),
+            "lr": 1e-4,
+            "weight_decay": 5e-4,
+            "best_train_loss": float("inf"),
+            "best_valid_loss": float("inf"),
+            "best_train_epoch": -1,
+            "best_valid_epoch": -1,
+            "batch_idx_train": 0,
+            "log_interval": 10,
+            "reset_interval": 200,
+            "valid_interval": 1000,
+            "save_checkpoint_interval": 5,
+            "beam_size": 10,
+            "reduction": "sum",
+            "use_double_scores": True,
+
+            "input_shape": [600, 600],
+            "backbone": "resnet50", ## vgg
+            "pretrained": False,
+            "anchors_size": [8, 16, 32],
+            "init_lr": 1e-4,
+            "optimizer_type": "adam",
+            "momentum": 0.9,
+            "weight_decay": 0,
+            "lr_decay_type": "cos",
+            "save_period": 5,
+            "eval_flag": True,
+            "eval_period": 5,
+            "scale": 1,
+
+            "env_info": get_env_info(),
+        }
+    )
+
+    return params
+
+
+def load_checkpoint_if_available(
+    params: AttributeDict,
+    model: nn.Module,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+) -> None:
+    """Load checkpoint from file.
+
+    If params.start_epoch is positive, it will load the checkpoint from
+    `params.start_epoch - 1`. Otherwise, this function does nothing.
+
+    Apart from loading state dict for `model`, `optimizer` and `scheduler`,
+    it also updates `best_train_epoch`, `best_train_loss`, `best_valid_epoch`,
+    and `best_valid_loss` in `params`.
+
+    Args:
+      params:
+        The return value of :func:`get_params`.
+      model:
+        The training model.
+      optimizer:
+        The optimizer that we are using.
+      scheduler:
+        The learning rate scheduler we are using.
+    Returns:
+      Return None.
+    """
+    if params.start_epoch <= 0:
+        return
+
+    filename = params.exp_dir / f"epoch-{params.start_epoch-1}.pt"
+    saved_params = load_checkpoint(
+        filename,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+    )
+
+    keys = [
+        "best_train_epoch",
+        "best_valid_epoch",
+        "batch_idx_train",
+        "best_train_loss",
+        "best_valid_loss",
+    ]
+    for k in keys:
+        params[k] = saved_params[k]
+
+    return saved_params
+
+
+def save_checkpoint(
+    params: AttributeDict,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    rank: int = 0,
+) -> None:
+    """Save model, optimizer, scheduler and training stats to file.
+
+    Args:
+      params:
+        It is returned by :func:`get_params`.
+      model:
+        The training model.
+    """
+    if rank != 0:
+        return
+    filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
+
+    if params.cur_epoch % params.save_checkpoint_interval == 0:
+        save_checkpoint_impl(
+            filename=filename,
+            model=model,
+            params=params,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            rank=rank,
+        )
+
+    if params.best_train_epoch == params.cur_epoch:
+        best_train_filename = params.exp_dir / "best-train-loss.pt"
+        copyfile(src=filename, dst=best_train_filename)
+
+    if params.best_valid_epoch == params.cur_epoch:
+        best_valid_filename = params.exp_dir / "best-valid-loss.pt"
+        copyfile(src=filename, dst=best_valid_filename)
+
+
+def compute_loss(
+    params: AttributeDict,
+    model: nn.Module,
+    batch: dict,
+    is_training: bool,
+) -> Tuple[Tensor, MetricsTracker]:
+    """
+    Compute loss given the model and its inputs.
+
+    Args:
+      params:
+        Parameters for training. See :func:`get_params`.
+      model:
+        The model for training. 
+      batch:
+        A batch of data. 
+      is_training:
+        True for training. False for validation. When it is True, this
+        function enables autograd during computation; when it is False, it
+        disables autograd.
+    """
+    images, boxes, labels = batch[0], batch[1], batch[2]
+
+    device = model.device
+    images = images.to(device)
+
+    train_util = FasterRCNNTrainer(model)
+
+    losses = ""
+    with torch.set_grad_enabled(is_training):
+        rpn_loc_loss, rpn_cls_loss, roi_loc_loss, roi_cls_loss = train_util.forward(images, boxes, labels, params.scale)
+        losses = [rpn_loc_loss, rpn_cls_loss, roi_loc_loss, roi_cls_loss]  ## 4 losses
+        losses = losses + [sum(losses)]                                    ## 5 losses
+
+    assert losses[-1].requires_grad == is_training
+
+    info = MetricsTracker()
+    info["rpn_loc_loss"] = rpn_loc_loss.detach().cpu().item()
+    info["rpn_cls_loss"] = rpn_cls_loss.detach().cpu().item()
+    info["roi_loc_loss"] = roi_loc_loss.detach().cpu().item()
+    info["roi_cls_loss"] = roi_cls_loss.detach().cpu().item()
+    info["total_sum_loss"] = losses[-1].detach().cpu().item()
+
+    return losses, info
+
+
+def compute_validation_loss(
+    params: AttributeDict,
+    model: nn.Module,
+    valid_dl: torch.utils.data.DataLoader,
+    world_size: int = 1,
+) -> MetricsTracker:
+    """Run the validation process. The validation loss
+    is saved in `params.valid_loss`.
+    """
+    model.eval()
+
+    tot_loss = MetricsTracker()
+
+    for batch_idx, batch in enumerate(valid_dl):
+        loss, loss_info = compute_loss(
+            params=params,
+            model=model,
+            batch=batch,
+            is_training=False,
+        )
+        assert loss.requires_grad is False
+
+        tot_loss = tot_loss + loss_info
+
+    if world_size > 1:
+        tot_loss.reduce(loss.device)
+
+    loss_value = tot_loss["total_sum_loss"]
+
+    if loss_value < params.best_valid_loss:
+        params.best_valid_epoch = params.cur_epoch
+        params.best_valid_loss = loss_value
+
+    return tot_loss
+
+
+def train_one_epoch(
+    params: AttributeDict,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    train_dl: torch.utils.data.DataLoader,
+    valid_dl: torch.utils.data.DataLoader,
+    tb_writer: Optional[SummaryWriter] = None,
+    world_size: int = 1,
+) -> None:
+    """Train the model for one epoch.
+
+    The training loss from the mean of all frames is saved in
+    `params.train_loss`. It runs the validation process every
+    `params.valid_interval` batches.
+
+    Args:
+      params:
+        It is returned by :func:`get_params`.
+      model:
+        The model for training.
+      optimizer:
+        The optimizer we are using.
+      train_dl:
+        Dataloader for the training dataset.
+      valid_dl:
+        Dataloader for the validation dataset.
+      tb_writer:
+        Writer to write log messages to tensorboard.
+      world_size:
+        Number of nodes in DDP training. If it is 1, DDP is disabled.
+    """
+    model.train()
+
+    tot_loss = MetricsTracker()
+
+    for batch_idx, batch in enumerate(train_dl):
+        params.batch_idx_train += 1
+        batch_size = len(batch)
+
+        losses, loss_info = compute_loss(
+            params=params,
+            model=model,
+            batch=batch,
+            is_training=True,
+        )
+        loss = losses[-1]  ## optimize the total sum loss
         
+        # summary stats.
+        tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
+
+        optimizer.zero_grad()
+        loss.backward()
+        clip_grad_norm_(model.parameters(), 5.0, 2.0)
+        optimizer.step()
+      
+        if batch_idx % params.log_interval == 0:
+            logging.info(
+                f"Epoch {params.cur_epoch}, "
+                f"batch {batch_idx}, loss[{loss_info}], "
+                f"tot_loss[{tot_loss}], batch size: {batch_size}"
+            )
+        if batch_idx % params.log_interval == 0:
+
+            if tb_writer is not None:
+                loss_info.write_summary(
+                    tb_writer, "train/current_", params.batch_idx_train
+                )
+                tot_loss.write_summary(tb_writer, "train/tot_", params.batch_idx_train)
+
+        if batch_idx > 0 and batch_idx % params.valid_interval == 0:
+            valid_info = compute_validation_loss(
+                params=params,
+                model=model,
+                valid_dl=valid_dl,
+                world_size=world_size,
+            )
+            model.train()
+            logging.info(f"Epoch {params.cur_epoch}, validation {valid_info}")
+            if tb_writer is not None:
+                valid_info.write_summary(
+                    tb_writer,
+                    "train/valid_",
+                    params.batch_idx_train,
+                )
+
+    loss_value = tot_loss["tot_sum_loss"]
+    params.train_loss = loss_value
+
+    if params.train_loss < params.best_train_loss:
+        params.best_train_epoch = params.cur_epoch
+        params.best_train_loss = params.train_loss
+
+
+def run(rank, world_size, args):
+    """
+    Args:
+      rank:
+        It is a value between 0 and `world_size-1`, which is
+        passed automatically by `mp.spawn()` in :func:`main`.
+        The node with rank 0 is responsible for saving checkpoint.
+      world_size:
+        Number of GPUs for DDP training.
+      args:
+        The return value of get_parser().parse_args()
+    """
+    params = get_params()
+    params.update(vars(args))
+
+    if world_size > 1:
+        setup_dist(rank, world_size, params.master_port)
+
+    setup_logger(f"{params.exp_dir}/log/log-train")
+    logging.info("Training started")
+    logging.info(params)
+
+    if args.tensorboard and rank == 0:
+        tb_writer = SummaryWriter(log_dir=f"{params.exp_dir}/tensorboard")
+    else:
+        tb_writer = None
+
+    device = torch.device("cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda", rank)
+
+    class_names, num_classes = get_classes(params.voc_classes_path)
+
+    model = FasterRCNN(
+        num_classes, 
+        anchor_scales = params.anchors_size, 
+        backbone = params.backbone, 
+        pretrained = params.pretrained,
+        device = device,
+        )
+
+    if params.start_epoch == 0 and params.backbone_weights_path != "":
+        print('Load weights {}.'.format(params.backbone_weights_path))
         #------------------------------------------------------#
         #   根据预训练权重的Key和模型的Key进行加载
         #------------------------------------------------------#
-        device          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model_dict      = model.state_dict()
-        pretrained_dict = torch.load(model_path, map_location = device)
+        pretrained_dict = torch.load(params.backbone_weights_path, map_location = device)
         load_key, no_load_key, temp_dict = [], [], {}
         for k, v in pretrained_dict.items():
             if k in model_dict.keys() and np.shape(model_dict[k]) == np.shape(v):
@@ -261,181 +604,94 @@ if __name__ == "__main__":
         #------------------------------------------------------#
         print("\nSuccessful Load Key:", str(load_key)[:500], "……\nSuccessful Load Key Num:", len(load_key))
         print("\nFail To Load Key:", str(no_load_key)[:500], "……\nFail To Load Key num:", len(no_load_key))
-        print("\n\033[1;33;44m温馨提示，head部分没有载入是正常现象，Backbone部分没有载入是错误的。\033[0m")
 
-    #----------------------#
-    #   记录Loss
-    #----------------------#
-    time_str        = datetime.datetime.strftime(datetime.datetime.now(),'%Y_%m_%d_%H_%M_%S')
-    log_dir         = os.path.join(save_dir, "loss_" + str(time_str))
-    loss_history    = LossHistory(log_dir, model, input_shape=input_shape)
+    checkpoints = load_checkpoint_if_available(params=params, model=model)
 
-    #------------------------------------------------------------------#
-    #   torch 1.2不支持amp，建议使用torch 1.7.1及以上正确使用fp16
-    #   因此torch1.2这里显示"could not be resolve"
-    #------------------------------------------------------------------#
-    if fp16:
-        from torch.cuda.amp import GradScaler as GradScaler
-        scaler = GradScaler()
-    else:
-        scaler = None
+    model.to(device)
+    if world_size > 1:
+        model = DDP(model, device_ids=[rank])
 
-    model_train     = model.train()
-    if Cuda:
-        model_train = torch.nn.DataParallel(model_train)
-        cudnn.benchmark = True
-        model_train = model_train.cuda()
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=params.lr,
+        weight_decay=params.weight_decay,
+    )
+    scheduler = StepLR(optimizer, step_size=8, gamma=0.1)
 
-    #---------------------------#
-    #   读取数据集对应的txt
-    #---------------------------#
+    if checkpoints:
+        optimizer.load_state_dict(checkpoints["optimizer"])
+        scheduler.load_state_dict(checkpoints["scheduler"])
+
+    train_annotation_path = params.data_dir / "2007_train.txt"
+    val_annotation_path = params.data_dir / "2007_val.txt"
+
     with open(train_annotation_path, encoding='utf-8') as f:
         train_lines = f.readlines()
     with open(val_annotation_path, encoding='utf-8') as f:
         val_lines   = f.readlines()
-    num_train   = len(train_lines)
-    num_val     = len(val_lines)
-    
-    show_config(
-        classes_path = classes_path, model_path = model_path, input_shape = input_shape, \
-        Init_Epoch = Init_Epoch, Freeze_Epoch = Freeze_Epoch, UnFreeze_Epoch = UnFreeze_Epoch, Freeze_batch_size = Freeze_batch_size, Unfreeze_batch_size = Unfreeze_batch_size, Freeze_Train = Freeze_Train, \
-        Init_lr = Init_lr, Min_lr = Min_lr, optimizer_type = optimizer_type, momentum = momentum, lr_decay_type = lr_decay_type, \
-        save_period = save_period, save_dir = save_dir, num_workers = num_workers, num_train = num_train, num_val = num_val
-    )
-    #---------------------------------------------------------#
-    #   总训练世代指的是遍历全部数据的总次数
-    #   总训练步长指的是梯度下降的总次数 
-    #   每个训练世代包含若干训练步长，每个训练步长进行一次梯度下降。
-    #   此处仅建议最低训练世代，上不封顶，计算时只考虑了解冻部分
-    #----------------------------------------------------------#
-    wanted_step = 5e4 if optimizer_type == "sgd" else 1.5e4
-    total_step  = num_train // Unfreeze_batch_size * UnFreeze_Epoch
-    if total_step <= wanted_step:
-        if num_train // Unfreeze_batch_size == 0:
-            raise ValueError('数据集过小，无法进行训练，请扩充数据集。')
-        wanted_epoch = wanted_step // (num_train // Unfreeze_batch_size) + 1
-        print("\n\033[1;33;44m[Warning] 使用%s优化器时，建议将训练总步长设置到%d以上。\033[0m"%(optimizer_type, wanted_step))
-        print("\033[1;33;44m[Warning] 本次运行的总训练数据量为%d，Unfreeze_batch_size为%d，共训练%d个Epoch，计算出总训练步长为%d。\033[0m"%(num_train, Unfreeze_batch_size, UnFreeze_Epoch, total_step))
-        print("\033[1;33;44m[Warning] 由于总训练步长为%d，小于建议总步长%d，建议设置总世代为%d。\033[0m"%(total_step, wanted_step, wanted_epoch))
 
-    #------------------------------------------------------#
-    #   主干特征提取网络特征通用，冻结训练可以加快训练速度
-    #   也可以在训练初期防止权值被破坏。
-    #   Init_Epoch为起始世代
-    #   Freeze_Epoch为冻结训练的世代
-    #   UnFreeze_Epoch总训练世代
-    #   提示OOM或者显存不足请调小Batch_size
-    #------------------------------------------------------#
-    if True:
-        UnFreeze_flag = False
-        #------------------------------------#
-        #   冻结一定部分训练
-        #------------------------------------#
-        if Freeze_Train:
-            for param in model.extractor.parameters():
-                param.requires_grad = False
-        # ------------------------------------#
-        #   冻结bn层
-        # ------------------------------------#
-        model.freeze_bn()
+    batch_size = params.freeze_batch_size if params.freeze_train else params.unfreeze_batch_size
 
-        #-------------------------------------------------------------------#
-        #   如果不冻结训练的话，直接设置batch_size为Unfreeze_batch_size
-        #-------------------------------------------------------------------#
-        batch_size = Freeze_batch_size if Freeze_Train else Unfreeze_batch_size
+    train_dataset = VOC2007Dataset(train_lines, params.input_shape, train = True)
+    valid_dataset   = VOC2007Dataset(val_lines, params.input_shape, train = False)
 
-        #-------------------------------------------------------------------#
-        #   判断当前batch_size，自适应调整学习率
-        #-------------------------------------------------------------------#
-        nbs             = 16
-        lr_limit_max    = 1e-4 if optimizer_type == 'adam' else 5e-2
-        lr_limit_min    = 1e-4 if optimizer_type == 'adam' else 5e-4
-        Init_lr_fit     = min(max(batch_size / nbs * Init_lr, lr_limit_min), lr_limit_max)
-        Min_lr_fit      = min(max(batch_size / nbs * Min_lr, lr_limit_min * 1e-2), lr_limit_max * 1e-2)
-        
-        #---------------------------------------#
-        #   根据optimizer_type选择优化器
-        #---------------------------------------#
-        optimizer = {
-            'adam'  : optim.Adam(model.parameters(), Init_lr_fit, betas = (momentum, 0.999), weight_decay = weight_decay),
-            'sgd'   : optim.SGD(model.parameters(), Init_lr_fit, momentum = momentum, nesterov=True, weight_decay = weight_decay)
-        }[optimizer_type]
-
-        #---------------------------------------#
-        #   获得学习率下降的公式
-        #---------------------------------------#
-        lr_scheduler_func = get_lr_scheduler(lr_decay_type, Init_lr_fit, Min_lr_fit, UnFreeze_Epoch)
-        
-        #---------------------------------------#
-        #   判断每一个世代的长度
-        #---------------------------------------#
-        epoch_step      = num_train // batch_size
-        epoch_step_val  = num_val // batch_size
-
-        if epoch_step == 0 or epoch_step_val == 0:
-            raise ValueError("数据集过小，无法继续进行训练，请扩充数据集。")
-
-        train_dataset   = FRCNNDataset(train_lines, input_shape, train = True)
-        val_dataset     = FRCNNDataset(val_lines, input_shape, train = False)
-
-        gen             = DataLoader(train_dataset, shuffle = True, batch_size = batch_size, num_workers = num_workers, pin_memory=True,
+    train_dl = DataLoader(train_dataset, shuffle = True, batch_size = batch_size, num_workers = params.num_workers, pin_memory=True,
                                     drop_last=True, collate_fn=frcnn_dataset_collate)
-        gen_val         = DataLoader(val_dataset  , shuffle = True, batch_size = batch_size, num_workers = num_workers, pin_memory=True, 
+    valid_dl = DataLoader(valid_dataset  , shuffle = True, batch_size = batch_size, num_workers = params.num_workers, pin_memory=True, 
                                     drop_last=True, collate_fn=frcnn_dataset_collate)
 
-        train_util      = FasterRCNNTrainer(model_train, optimizer)
-        #----------------------#
-        #   记录eval的map曲线
-        #----------------------#
-        eval_callback   = EvalCallback(model_train, input_shape, class_names, num_classes, val_lines, log_dir, Cuda, \
-                                        eval_flag=eval_flag, period=eval_period)
+    for epoch in range(params.start_epoch, params.num_epochs):
 
-        #---------------------------------------#
-        #   开始模型训练
-        #---------------------------------------#
-        for epoch in range(Init_Epoch, UnFreeze_Epoch):
-            #---------------------------------------#
-            #   如果模型有冻结学习部分
-            #   则解冻，并设置参数
-            #---------------------------------------#
-            if epoch >= Freeze_Epoch and not UnFreeze_flag and Freeze_Train:
-                batch_size = Unfreeze_batch_size
+        if epoch > params.start_epoch:
+            logging.info(f"epoch {epoch}, lr: {scheduler.get_last_lr()[0]}")
 
-                #-------------------------------------------------------------------#
-                #   判断当前batch_size，自适应调整学习率
-                #-------------------------------------------------------------------#
-                nbs             = 16
-                lr_limit_max    = 1e-4 if optimizer_type == 'adam' else 5e-2
-                lr_limit_min    = 1e-4 if optimizer_type == 'adam' else 5e-4
-                Init_lr_fit     = min(max(batch_size / nbs * Init_lr, lr_limit_min), lr_limit_max)
-                Min_lr_fit      = min(max(batch_size / nbs * Min_lr, lr_limit_min * 1e-2), lr_limit_max * 1e-2)
-                #---------------------------------------#
-                #   获得学习率下降的公式
-                #---------------------------------------#
-                lr_scheduler_func = get_lr_scheduler(lr_decay_type, Init_lr_fit, Min_lr_fit, UnFreeze_Epoch)
-                
-                for param in model.extractor.parameters():
-                    param.requires_grad = True
-                # ------------------------------------#
-                #   冻结bn层
-                # ------------------------------------#
-                model.freeze_bn()
+        if tb_writer is not None:
+            tb_writer.add_scalar(
+                "train/lr",
+                scheduler.get_last_lr()[0],
+                params.batch_idx_train,
+            )
+            tb_writer.add_scalar("train/epoch", epoch, params.batch_idx_train)
 
-                epoch_step      = num_train // batch_size
-                epoch_step_val  = num_val // batch_size
+        params.cur_epoch = epoch
 
-                if epoch_step == 0 or epoch_step_val == 0:
-                    raise ValueError("数据集过小，无法继续进行训练，请扩充数据集。")
+        train_one_epoch(
+            params=params,
+            model=model,
+            optimizer=optimizer,
+            train_dl=train_dl,
+            valid_dl=valid_dl,
+            tb_writer=tb_writer,
+            world_size=world_size,
+        )
 
-                gen             = DataLoader(train_dataset, shuffle = True, batch_size = batch_size, num_workers = num_workers, pin_memory=True,
-                                            drop_last=True, collate_fn=frcnn_dataset_collate)
-                gen_val         = DataLoader(val_dataset  , shuffle = True, batch_size = batch_size, num_workers = num_workers, pin_memory=True, 
-                                            drop_last=True, collate_fn=frcnn_dataset_collate)
+        scheduler.step()
 
-                UnFreeze_flag = True
-                
-            set_optimizer_lr(optimizer, lr_scheduler_func, epoch)
-            
-            fit_one_epoch(model, train_util, loss_history, eval_callback, optimizer, epoch, epoch_step, epoch_step_val, gen, gen_val, UnFreeze_Epoch, Cuda, fp16, scaler, save_period, save_dir)
-            
-        loss_history.writer.close()
+        save_checkpoint(
+            params=params,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            rank=rank,
+        )
+
+    logging.info("Done!")
+    if world_size > 1:
+        torch.distributed.barrier()
+        cleanup_dist()
+
+
+def main():
+    parser = get_parser()
+    args = parser.parse_args()
+
+    world_size = args.world_size
+    assert world_size >= 1
+    if world_size > 1:
+        mp.spawn(run, args=(world_size, args), nprocs=world_size, join=True)
+    else:
+        run(rank=0, world_size=1, args=args)
+
+
+if __name__ == "__main__":
+    main()
