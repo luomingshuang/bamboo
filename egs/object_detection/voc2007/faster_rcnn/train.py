@@ -33,8 +33,8 @@ sys.path.append(cwd)               ## add local to package
 
 ## if there exists error called `wandb: Network error (ConnectionError), entering retry loop.`
 ## if not, we can set `os.environ["WANDB_MODE"] = "online"`
-os.environ["WANDB_API_KEY"] = "15a220c01c2e84719bcbb7e21e4cdcf553f5530d"
-os.environ["WANDB_MODE"] = "offline"
+# os.environ["WANDB_API_KEY"] = "15a220c01c2e84719bcbb7e21e4cdcf553f5530d"
+# os.environ["WANDB_MODE"] = "online"
 
 from icefall.checkpoint import load_checkpoint
 from icefall.checkpoint import save_checkpoint as save_checkpoint_impl
