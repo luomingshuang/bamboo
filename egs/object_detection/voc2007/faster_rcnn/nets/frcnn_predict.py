@@ -28,64 +28,29 @@ from utils.utils_bbox import DecodeBox
 #   model_path和classes_path参数的修改
 #--------------------------------------------#
 class FRCNN(object):
-    _defaults = {
-        #--------------------------------------------------------------------------#
-        #   使用自己训练好的模型进行预测一定要修改model_path和classes_path！
-        #   model_path指向logs文件夹下的权值文件，classes_path指向model_data下的txt
-        #
-        #   训练好后logs文件夹下存在多个权值文件，选择验证集损失较低的即可。
-        #   验证集损失较低不代表mAP较高，仅代表该权值在验证集上泛化性能较好。
-        #   如果出现shape不匹配，同时要注意训练时的model_path和classes_path参数的修改
-        #--------------------------------------------------------------------------#
-        # "model_path"    : 'download/voc2007_model_data/voc_weights_backbone/voc_weights_resnet.pth',
-        "model_path"    : '/home/bcxiong1/codes/bamboo/egs/object_detection/voc2007/faster_rcnn/exp/best-valid-loss.pt',
-        "classes_path"  : 'download/voc2007_model_data/voc_classes.txt',
-        #---------------------------------------------------------------------#
-        #   网络的主干特征提取网络，resnet50或者vgg
-        #---------------------------------------------------------------------#
-        "backbone"      : "resnet50",
-        #---------------------------------------------------------------------#
-        #   只有得分大于置信度的预测框会被保留下来
-        #---------------------------------------------------------------------#
-        "confidence"    : 0.5,
-        #---------------------------------------------------------------------#
-        #   非极大抑制所用到的nms_iou大小
-        #---------------------------------------------------------------------#
-        "nms_iou"       : 0.3,
-        #---------------------------------------------------------------------#
-        #   用于指定先验框的大小
-        #---------------------------------------------------------------------#
-        'anchors_size'  : [8, 16, 32],
-        #-------------------------------#
-        #   是否使用Cuda
-        #   没有GPU可以设置成False
-        #-------------------------------#
-        "cuda"          : True,
-    }
+    def __init__(self, model_path = "model_data/voc_weights_resnet",
+                    classes_path = "model_data/voc_classes.txt",
+                    backbone = "resnet50",
+                    confidence = 0.5,
+                    nms_iou = 0.3,
+                    anchors_size = [8, 16, 32],
+                    device = None,):
+        super(FRCNN, self).__init__()
+        self.model_path = model_path
+        self.classes_path = classes_path
+        self.backbone = backbone
+        self.confidence = confidence
+        self.nms_iou = nms_iou
+        self.anchors_size = anchors_size
+        self.device = device
 
-    @classmethod
-    def get_defaults(cls, n):
-        if n in cls._defaults:
-            return cls._defaults[n]
-        else:
-            return "Unrecognized attribute name '" + n + "'"
-
-    #---------------------------------------------------#
-    #   初始化faster RCNN
-    #---------------------------------------------------#
-    def __init__(self, **kwargs):
-        self.__dict__.update(self._defaults)
-        for name, value in kwargs.items():
-            setattr(self, name, value)
-            self._defaults[name] = value 
         #---------------------------------------------------#
         #   获得种类和先验框的数量
         #---------------------------------------------------#
-        self.class_names, self.num_classes  = get_classes(self.classes_path)
+        self.class_names, self.num_classes = get_classes(self.classes_path)
 
-        self.std    = torch.Tensor([0.1, 0.1, 0.2, 0.2]).repeat(self.num_classes + 1)[None]
-        if self.cuda:
-            self.std    = self.std.cuda()
+        self.std = torch.Tensor([0.1, 0.1, 0.2, 0.2]).repeat(self.num_classes + 1)[None]
+        self.std    = self.std.to(self.device)
         self.bbox_util  = DecodeBox(self.std, self.num_classes)
 
         #---------------------------------------------------#
@@ -94,10 +59,8 @@ class FRCNN(object):
         hsv_tuples = [(x / self.num_classes, 1., 1.) for x in range(self.num_classes)]
         self.colors = list(map(lambda x: colorsys.hsv_to_rgb(*x), hsv_tuples))
         self.colors = list(map(lambda x: (int(x[0] * 255), int(x[1] * 255), int(x[2] * 255)), self.colors))
-        self.generate()
-
-        show_config(**self._defaults)
-
+        self.generate()   
+  
     #---------------------------------------------------#
     #   载入模型
     #---------------------------------------------------#
@@ -112,9 +75,8 @@ class FRCNN(object):
         self.net    = self.net.eval()
         print('{} model, anchors, and classes loaded.'.format(self.model_path))
         
-        if self.cuda:
-            self.net = nn.DataParallel(self.net)
-            self.net = self.net.cuda()
+        self.net = nn.DataParallel(self.net)
+        self.net = self.net.to(device)
     
     #---------------------------------------------------#
     #   检测图片
@@ -144,8 +106,8 @@ class FRCNN(object):
 
         with torch.no_grad():
             images = torch.from_numpy(image_data)
-            if self.cuda:
-                images = images.cuda()
+            
+            images = images.to(self.device)
             
             #-------------------------------------------------------------#
             #   roi_cls_locs  建议框的调整参数
@@ -259,8 +221,8 @@ class FRCNN(object):
 
         with torch.no_grad():
             images = torch.from_numpy(image_data)
-            if self.cuda:
-                images = images.cuda()
+        
+            images = images.to(self.device)
 
             roi_cls_locs, roi_scores, rois, _ = self.net(images)
             #-------------------------------------------------------------#
@@ -309,8 +271,8 @@ class FRCNN(object):
 
         with torch.no_grad():
             images = torch.from_numpy(image_data)
-            if self.cuda:
-                images = images.cuda()
+           
+            images = images.to(self.device)
 
             roi_cls_locs, roi_scores, rois, _ = self.net(images)
             #-------------------------------------------------------------#

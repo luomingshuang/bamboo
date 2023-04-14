@@ -3,15 +3,109 @@
 #   整合到了一个py文件中，通过指定mode进行模式的修改。
 #----------------------------------------------------#
 import time
-
+import argparse
 import cv2
 import numpy as np
 from PIL import Image
 
+import torch
+
 from nets.frcnn_predict import FRCNN
 
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def get_parser():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default='/home/bcxiong1/codes/bamboo/egs/object_detection/voc2007/faster_rcnn/exp/best-valid-loss.pt',
+        help="The model weights path for predicting.",
+    )
+
+    parser.add_argument(
+        "--classes-path",
+        type=str,
+        default="download/voc2007_model_data/voc_classes.txt",
+        help="Path for the voc2007 classes name file.",
+    )
+
+    parser.add_argument(
+        "--backbone",
+        type=str,
+        default="resnet50",
+        help="The type of backbone.",
+    )
+    
+    parser.add_argument(
+        "--confidence",
+        type=float,
+        default=0.5,
+        help="the score for predicting box, if over it, will be used.",
+    )
+
+    parser.add_argument(
+        "--nms-iou",
+        type=float,
+        default=0.3,
+        help="the value used for non-maximum suppression.",
+    )
+
+    parser.add_argument(
+        "--anchors-size",
+        type=list,
+        default=[8, 16, 32],
+        help="Used to specify the size of the prior box.",
+    )
+
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="dir_predict",
+        help="""
+        mode用于指定测试的模式：
+        'predict'表示单张图片预测，如果想对预测过程进行修改，如保存图片，截取对象等，可以先看下方详细的注释
+        'video'表示视频检测，可调用摄像头或者视频进行检测，详情查看下方注释。
+        'fps'表示测试fps，使用的图片是img里面的street.jpg，详情查看下方注释。
+        'dir_predict'表示遍历文件夹进行检测并保存。默认遍历img文件夹，保存img_out文件夹，详情查看下方注释。
+        """,
+    )
+
+    parser.add_argument(
+        "--samples-dir-path",
+        type=str,
+        default="samples/",
+        help="the directory for the samples.",
+    )
+
+    parser.add_argument(
+        "--detect-results-path",
+        type=str,
+        default="detect_results/",
+        help="the directory for the samples.",
+    )
+
+    return parser
+
+
 if __name__ == "__main__":
-    frcnn = FRCNN()
+    parser = get_parser()
+    args = parser.parse_args()
+
+    frcnn = FRCNN(
+        model_path = args.model_path,
+        classes_path = args.classes_path,
+        backbone = args.backbone,
+        confidence = args.confidence,
+        nms_iou = args.nms_iou,
+        anchors_size = args.anchors_size,
+        device = device,
+    )
+
     #----------------------------------------------------------------------------------------------------------#
     #   mode用于指定测试的模式：
     #   'predict'           表示单张图片预测，如果想对预测过程进行修改，如保存图片，截取对象等，可以先看下方详细的注释
@@ -19,7 +113,8 @@ if __name__ == "__main__":
     #   'fps'               表示测试fps，使用的图片是img里面的street.jpg，详情查看下方注释。
     #   'dir_predict'       表示遍历文件夹进行检测并保存。默认遍历img文件夹，保存img_out文件夹，详情查看下方注释。
     #----------------------------------------------------------------------------------------------------------#
-    mode = "dir_predict"
+    mode = args.mode
+    
     #-------------------------------------------------------------------------#
     #   crop                指定了是否在单张图片预测后对目标进行截取
     #   count               指定了是否进行目标的计数
@@ -27,6 +122,7 @@ if __name__ == "__main__":
     #-------------------------------------------------------------------------#
     crop            = False
     count           = False
+    
     #----------------------------------------------------------------------------------------------------------#
     #   video_path          用于指定视频的路径，当video_path=0时表示检测摄像头
     #                       想要检测视频，则设置如video_path = "xxx.mp4"即可，代表读取出根目录下的xxx.mp4文件。
@@ -40,6 +136,7 @@ if __name__ == "__main__":
     video_path      = 0
     video_save_path = ""
     video_fps       = 25.0
+    
     #----------------------------------------------------------------------------------------------------------#
     #   test_interval       用于指定测量fps的时候，图片检测的次数。理论上test_interval越大，fps越准确。
     #   fps_image_path      用于指定测试的fps图片
@@ -47,15 +144,16 @@ if __name__ == "__main__":
     #   test_interval和fps_image_path仅在mode='fps'有效
     #----------------------------------------------------------------------------------------------------------#
     test_interval   = 100
-    fps_image_path  = "img/street.jpg"
+    fps_image_path  = "samples/street.jpg"
+    
     #-------------------------------------------------------------------------#
     #   dir_origin_path     指定了用于检测的图片的文件夹路径
     #   dir_save_path       指定了检测完图片的保存路径
     #   
     #   dir_origin_path和dir_save_path仅在mode='dir_predict'时有效
     #-------------------------------------------------------------------------#
-    dir_origin_path = "samples/"
-    dir_save_path   = "detect_results_new/"
+    dir_origin_path = args.samples_dir_path
+    dir_save_path   = args.detect_results_path
 
     if mode == "predict":
         '''
