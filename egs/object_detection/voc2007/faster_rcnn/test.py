@@ -23,7 +23,7 @@ def get_parser():
     parser.add_argument(
         "--model-path",
         type=str,
-        default='/home/bcxiong1/codes/bamboo/egs/object_detection/voc2007/faster_rcnn/exp/best-valid-loss.pt',
+        default='download/voc2007_model_data/voc_weights_backbone/voc_weights_resnet.pth',
         help="The model weights path for predicting.",
     )
 

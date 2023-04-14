@@ -73,14 +73,15 @@ if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
   # You should make sure you have installed git-lfs
   # You can install git-lfs as follows:
   # apt-get install git-lfs
-  git lfs install
-  git clone https://huggingface.co/luomingshuang/voc2007_model_data $dl_dir/voc2007_model_data
- 
+  if [! -e $dl_dir/voc2007_model_data ]; then
+      git lfs install
+      git clone https://huggingface.co/luomingshuang/voc2007_model_data $dl_dir/voc2007_model_data
+  fi
 fi
 
 if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
   log "Stage 1: Prepare train and val data"
-  data_dir=/home/bcxiong1/data/voc
+  data_dir=/userhome/data/voc_2007_2012
   out_dir=data/voc2007
   year=2007
   

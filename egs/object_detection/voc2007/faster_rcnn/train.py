@@ -96,7 +96,7 @@ def get_parser():
     parser.add_argument(
         "--backbone-weights-path",
         type=str,
-        default="download/voc2007_model_data/voc_weights_backbone/voc_weights_resnet.pth",
+        default="download/voc2007_model_data/voc_weights_backbone/resnet50-19c8e357.pth",
         help="Path for the pretrained backbone weights file.",
         # When is "", the model doesn't load any pretrained backbone weights file.
     )
@@ -368,17 +368,14 @@ def save_checkpoint(
         return
     filename = Path(params.exp_dir) / f"epoch-{params.cur_epoch}.pt"
 
-    if params.cur_epoch % params.save_checkpoint_interval == 0 \
-        or params.start_epoch != 0 \
-        or params.num_epochs <= params.save_checkpoint_interval:
-        save_checkpoint_impl(
-            filename=filename,
-            model=model,
-            params=params,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            rank=rank,
-        )
+    save_checkpoint_impl(
+        filename=filename,
+        model=model,
+        params=params,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        rank=rank,
+    )
 
     if params.best_train_epoch == params.cur_epoch:
         best_train_filename = Path(params.exp_dir) / "best-train-loss.pt"
