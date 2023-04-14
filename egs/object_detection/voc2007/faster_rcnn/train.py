@@ -31,6 +31,11 @@ cwd = os.getcwd()                  ## get the current path
 import sys
 sys.path.append(cwd)               ## add local to package 
 
+## if there exists error called `wandb: Network error (ConnectionError), entering retry loop.`
+## if not, we can set `os.environ["WANDB_MODE"] = "online"`
+os.environ["WANDB_API_KEY"] = "15a220c01c2e84719bcbb7e21e4cdcf553f5530d"
+os.environ["WANDB_MODE"] = "offline"
+
 from icefall.checkpoint import load_checkpoint
 from icefall.checkpoint import save_checkpoint as save_checkpoint_impl
 from icefall.dist import cleanup_dist, setup_dist
@@ -267,7 +272,7 @@ def get_params() -> AttributeDict:
             "batch_idx_train": 0,
             "log_interval": 10,
             "reset_interval": 200,
-            "valid_interval": 300,
+            "valid_interval": 50,
             "save_checkpoint_interval": 5,
             "reduction": "sum",
             "use_double_scores": True,
@@ -363,7 +368,9 @@ def save_checkpoint(
         return
     filename = Path(params.exp_dir) / f"epoch-{params.cur_epoch}.pt"
 
-    if params.cur_epoch % params.save_checkpoint_interval == 0 or params.start_epoch != 0:
+    if params.cur_epoch % params.save_checkpoint_interval == 0 \
+        or params.start_epoch != 0 \
+        or params.num_epochs <= params.save_checkpoint_interval:
         save_checkpoint_impl(
             filename=filename,
             model=model,
@@ -448,12 +455,13 @@ def compute_validation_loss(
             batch=batch,
             is_training=False,
         )
+
         assert losses[-1].requires_grad is False
 
         tot_loss = tot_loss + loss_info
 
     if world_size > 1:
-        tot_loss.reduce(losses.device)
+        tot_loss.reduce(losses[-1].device)
 
     loss_value = tot_loss["total_sum_loss"]
 
@@ -654,8 +662,8 @@ def run(rank, world_size, args):
         #------------------------------------------------------#
         #   显示没有匹配上的Key
         #------------------------------------------------------#
-        print("\nSuccessful Load Key:", str(load_key), "\nSuccessful Load Key Num:", len(load_key))
-        print("\nFail To Load Key:", str(no_load_key), "\nFail To Load Key num:", len(no_load_key))
+        print("Successful Load Key Num:", len(load_key))
+        print("Fail To Load Key num:", len(no_load_key))
 
     checkpoints = load_checkpoint_if_available(params=params, model=model)
 
@@ -699,6 +707,11 @@ def run(rank, world_size, args):
     valid_dl = DataLoader(valid_dataset, shuffle = True, batch_size = batch_size, num_workers = params.num_workers, pin_memory=True, 
                                     drop_last=True, collate_fn=frcnn_dataset_collate)
 
+    num_samples = len(train_dataset)
+    
+    if params.valid_interval >= int(num_samples / batch_size):
+        params.valid_interval = int(num_samples / batch_size) - 1
+
     for epoch in range(params.start_epoch, params.num_epochs):
         
         if epoch >= params.freeze_epoch and params.freeze_train:
@@ -721,6 +734,12 @@ def run(rank, world_size, args):
                                     drop_last=True, collate_fn=frcnn_dataset_collate)
             valid_dl = DataLoader(valid_dataset, shuffle = True, batch_size = batch_size, num_workers = params.num_workers, pin_memory=True, 
                                     drop_last=True, collate_fn=frcnn_dataset_collate)
+
+            num_samples = len(train_dataset)
+    
+            if params.valid_interval >= int(num_samples / batch_size):
+                params.valid_interval = int(num_samples / batch_size) - 1
+
         
         if epoch > params.start_epoch:
             logging.info(f"epoch {epoch}, lr: {scheduler.get_last_lr()[0]}")
