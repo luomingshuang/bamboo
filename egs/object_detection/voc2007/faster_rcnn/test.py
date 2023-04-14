@@ -85,7 +85,7 @@ def get_parser():
     parser.add_argument(
         "--detect-results-path",
         type=str,
-        default="detect_results/",
+        default="faster_rcnn/exp/detect_samples_results",
         help="the directory for the samples.",
     )
 
