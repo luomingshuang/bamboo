@@ -1,5 +1,5 @@
 <div align="center">
-<img src="https://github.com/luomingshuang/My-vimrc-config/blob/master/bamboo.jpg" width=168>
+<img src="https://github.com/luomingshuang/My-vimrc-config/blob/master/bamboo.jpg" width=320>
 </div>
 
 ## Introduction
