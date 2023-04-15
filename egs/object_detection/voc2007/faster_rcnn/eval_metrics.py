@@ -4,15 +4,115 @@ cwd = os.getcwd()                  ## get the current path
 import sys
 sys.path.append(cwd)               ## add local to package 
 
+import argparse
+
 import os
 import xml.etree.ElementTree as ET
+
+import torch
 
 from PIL import Image
 from tqdm import tqdm
 
 from local.utils import get_classes
 from local.utils_map import get_coco_map, get_map
+
 from nets.frcnn_predict import FRCNN
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def get_parser():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default='download/voc2007_model_data/voc_weights_backbone/voc_weights_resnet.pth',
+        help="The model weights path for predicting.",
+    )
+
+    parser.add_argument(
+        "--classes-path",
+        type=str,
+        default="download/voc2007_model_data/voc_classes.txt",
+        help="Path for the voc2007 classes name file.",
+    )
+
+    parser.add_argument(
+        "--backbone",
+        type=str,
+        default="resnet50",
+        help="The type of backbone.",
+    )
+    
+    parser.add_argument(
+        "--confidence",
+        type=float,
+        default=0.5,
+        help="the score for predicting box, if over it, will be used.",
+    )
+
+    parser.add_argument(
+        "--nms-iou",
+        type=float,
+        default=0.3,
+        help="the value used for non-maximum suppression.",
+    )
+
+    parser.add_argument(
+        "--anchors-size",
+        type=list,
+        default=[8, 16, 32],
+        help="Used to specify the size of the prior box.",
+    )
+
+    parser.add_argument(
+        "--map-mode",
+        type=int,
+        default=0,
+        help="""
+        map_mode用于指定该文件运行时计算的内容
+        map_mode为0代表整个map计算流程，包括获得预测结果、获得真实框、计算VOC_map。
+        map_mode为1代表仅仅获得预测结果。
+        map_mode为2代表仅仅获得真实框。
+        map_mode为3代表仅仅计算VOC_map。
+        map_mode为4代表利用COCO工具箱计算当前数据集的0.50:0.95map。需要获得预测结果、获得真实框后并安装pycocotools才行
+        """,
+    )
+
+    parser.add_argument(
+        "--map-vis",
+        type=bool,
+        default=False,
+        help="Show the voc map, or not",
+    )
+    
+    parser.add_argument(
+        "--voc-data-path",
+        type=str,
+        default="/userhome/data/voc_2007_2012",
+        help="Path for voc2007 data",
+    )
+    
+    parser.add_argument(
+        "--samples-dir-path",
+        type=str,
+        default="samples/",
+        help="the directory for the samples.",
+    )
+
+    parser.add_argument(
+        "--detect-results-path",
+        type=str,
+        default="faster_rcnn/exp/detect_samples_results",
+        help="the directory for the samples.",
+    )
+
+    return parser
+
 
 if __name__ == "__main__":
     '''
@@ -21,20 +121,18 @@ if __name__ == "__main__":
     受到mAP计算原理的限制，网络在计算mAP时需要获得近乎所有的预测框，这样才可以计算不同门限条件下的Recall和Precision值
     因此，本代码获得的map_out/detection-results/里面的txt的框的数量一般会比直接predict多一些，目的是列出所有可能的预测框，
     '''
-    #------------------------------------------------------------------------------------------------------------------#
-    #   map_mode用于指定该文件运行时计算的内容
-    #   map_mode为0代表整个map计算流程，包括获得预测结果、获得真实框、计算VOC_map。
-    #   map_mode为1代表仅仅获得预测结果。
-    #   map_mode为2代表仅仅获得真实框。
-    #   map_mode为3代表仅仅计算VOC_map。
-    #   map_mode为4代表利用COCO工具箱计算当前数据集的0.50:0.95map。需要获得预测结果、获得真实框后并安装pycocotools才行
-    #-------------------------------------------------------------------------------------------------------------------#
-    map_mode        = 0
+    
+    parser = get_parser()
+    args = parser.parse_args()
+    
+    map_mode = args.map_mode
+    
     #--------------------------------------------------------------------------------------#
     #   此处的classes_path用于指定需要测量VOC_map的类别
     #   一般情况下与训练和预测所用的classes_path一致即可
     #--------------------------------------------------------------------------------------#
-    classes_path    = 'model_data/voc_classes.txt'
+    classes_path    = args.classes_path
+    
     #--------------------------------------------------------------------------------------#
     #   MINOVERLAP用于指定想要获得的mAP0.x，mAP0.x的意义是什么请同学们百度一下。
     #   比如计算mAP0.75，可以设定MINOVERLAP = 0.75。
@@ -43,6 +141,7 @@ if __name__ == "__main__":
     #   因此MINOVERLAP的值越大，预测框要预测的越准确才能被认为是正样本，此时算出来的mAP值越低，
     #--------------------------------------------------------------------------------------#
     MINOVERLAP      = 0.5
+    
     #--------------------------------------------------------------------------------------#
     #   受到mAP计算原理的限制，网络在计算mAP时需要获得近乎所有的预测框，这样才可以计算mAP
     #   因此，confidence的值应当设置的尽量小进而获得全部可能的预测框。
@@ -51,12 +150,14 @@ if __name__ == "__main__":
     #   想要获得不同门限值下的Recall和Precision值，请修改下方的score_threhold。
     #--------------------------------------------------------------------------------------#
     confidence      = 0.02
+    
     #--------------------------------------------------------------------------------------#
     #   预测时使用到的非极大抑制值的大小，越大表示非极大抑制越不严格。
     #   
     #   该值一般不调整。
     #--------------------------------------------------------------------------------------#
     nms_iou         = 0.5
+    
     #---------------------------------------------------------------------------------------------------------------#
     #   Recall和Precision不像AP是一个面积的概念，因此在门限值不同时，网络的Recall和Precision值是不同的。
     #   
@@ -65,19 +166,22 @@ if __name__ == "__main__":
     #   这里专门定义一个score_threhold用于代表门限值，进而在计算mAP时找到门限值对应的Recall和Precision值。
     #---------------------------------------------------------------------------------------------------------------#
     score_threhold  = 0.5
+    
     #-------------------------------------------------------#
     #   map_vis用于指定是否开启VOC_map计算的可视化
     #-------------------------------------------------------#
-    map_vis         = False
+    map_vis         = args.map_vis
+    
     #-------------------------------------------------------#
     #   指向VOC数据集所在的文件夹
     #   默认指向根目录下的VOC数据集
     #-------------------------------------------------------#
-    VOCdevkit_path  = 'VOCdevkit'
+    VOCdevkit_path  = args.voc_data_path
+    
     #-------------------------------------------------------#
     #   结果输出的文件夹，默认为map_out
     #-------------------------------------------------------#
-    map_out_path    = 'map_out'
+    map_out_path    = 'faster_rcnn/exp/map_out'
 
     image_ids = open(os.path.join(VOCdevkit_path, "VOC2007/ImageSets/Main/test.txt")).read().strip().split()
 
@@ -94,7 +198,15 @@ if __name__ == "__main__":
 
     if map_mode == 0 or map_mode == 1:
         print("Load model.")
-        frcnn = FRCNN(confidence = confidence, nms_iou = nms_iou)
+        frcnn = FRCNN(
+            model_path = args.model_path,
+            classes_path = args.classes_path,
+            backbone = args.backbone,
+            confidence = args.confidence,
+            nms_iou = args.nms_iou,
+            anchors_size = args.anchors_size,
+            device = device,
+        )
         print("Load model done.")
 
         print("Get predict result.")

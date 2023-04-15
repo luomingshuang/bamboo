@@ -12,7 +12,7 @@ if __name__ == "__main__":
     num_classes     = 21
     
     device  = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model   = FasterRCNN(num_classes, backbone = 'vgg').to(device)
+    model   = FasterRCNN(num_classes, backbone = 'resnet50').to(device)
     summary(model, (3, input_shape[0], input_shape[1]))
     
     dummy_input     = torch.randn(1, 3, input_shape[0], input_shape[1]).to(device)
