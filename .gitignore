@@ -1,0 +1,15 @@
+icefall.egg-info/
+data
+__pycache__
+path.sh
+exp
+exp*/
+*.pt
+download
+dask-worker-space
+log
+*.bak
+*-bak
+*bak.py
+*.param
+*.bin
