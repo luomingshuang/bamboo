@@ -88,12 +88,61 @@ if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
   mkdir -p $out_dir
 
   python ./local/voc_annotation.py \
-   --data-dir $data_dir \
-   --out-dir $out_dir \
-   --class-txt $dl_dir/voc2007_model_data/voc_classes.txt \
-   --year 2007 \
-   --trainval-percent 0.9 \
-   --train-percent 0.9 \
-   --annotation-mode 0
-   
+    --data-dir $data_dir \
+    --out-dir $out_dir \
+    --class-txt $dl_dir/voc2007_model_data/voc_classes.txt \
+    --year 2007 \
+    --trainval-percent 0.9 \
+    --train-percent 0.9 \
+    --annotation-mode 0
+fi
+
+if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
+  log "Stage 2: Train the faster rcnn"
+  # Just a simple training commands
+  # You should change your parameters by yourself.
+  python ./faster_rcnn/train.py \
+    --exp-dir faster_rcnn/exp \
+    --wandb True \
+    --freeze-train True \
+    --freeze-batch-size 16 \
+    --unfreeze-batch-size 12 \
+    --num-epochs 100 \
+    --freeze-epoch 50
+fi
+
+if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
+  log "Stage 3: Eval metrics for the trained model"
+  # Eval metrics for the voc2007 test data
+  
+  python ./faster_rcnn/eval_metrics.py \
+    --model-path faster_rcnn/exp/best-valid-loss.pt \
+    --classes-path $dl_dir/voc2007_model_data/voc_classes.txt \
+    --backbone resnet50 \
+    --confidence 0.5 \
+    --nms-iou 0.3 \
+    --anchors-size [8, 16, 32] \
+    --map-mode 0 \ 
+    --voc-data-path /userhome/data/voc_2007_2012
+fi
+
+if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
+  log "Stage 4: Do summary for the trained model"
+  
+  python ./faster_rcnn/summary.py \
+fi
+
+if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
+  log "Stage 5: Test some samples on the trained model"
+  
+  python ./faster_rcnn/test.py \
+    --model-path faster_rcnn/exp/best-valid-loss.pt \
+    --classes-path $dl_dir/voc2007_model_data/voc_classes.txt \
+    --backbone resnet50 \
+    --confidence 0.5 \
+    --nms-iou 0.3 \
+    --anchors-size [8, 16, 32] \
+    --mode dir_predict \
+    --samples-dir-path samples\ \
+    --detect-results-path faster_rcnn/exp/detect_samples_results
 fi

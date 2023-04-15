@@ -175,6 +175,7 @@ if __name__ == "__main__":
                 continue
             else:
                 r_image = frcnn.detect_image(image, crop = crop, count = count)
+                r_image.save("faster_rcnn/exp/predict_img.jpg")
                 r_image.show()
 
     elif mode == "video":

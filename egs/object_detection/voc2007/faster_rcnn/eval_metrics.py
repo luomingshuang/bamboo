@@ -96,20 +96,6 @@ def get_parser():
         default="/userhome/data/voc_2007_2012",
         help="Path for voc2007 data",
     )
-    
-    parser.add_argument(
-        "--samples-dir-path",
-        type=str,
-        default="samples/",
-        help="the directory for the samples.",
-    )
-
-    parser.add_argument(
-        "--detect-results-path",
-        type=str,
-        default="faster_rcnn/exp/detect_samples_results",
-        help="the directory for the samples.",
-    )
 
     return parser
 

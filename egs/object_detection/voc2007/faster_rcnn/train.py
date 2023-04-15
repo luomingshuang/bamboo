@@ -165,13 +165,6 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--unfreeze-epoch",
-        type=int,
-        default=100,
-        help="the training epochs for training the whole model (including backbone).",
-    )
-
-    parser.add_argument(
         "--unfreeze-batch-size",
         type=int,
         default=2,
@@ -618,7 +611,6 @@ def run(rank, world_size, args):
                 "freeze_train": params.freeze_train,
                 "freeze_epoch": params.freeze_epoch,
                 "freeze_batch_size": params.freeze_batch_size,
-                "unfreeze_epoch": params.unfreeze_epoch,
                 "start_epoch": params.start_epoch,
                 "backbone": params.backbone,
             }
