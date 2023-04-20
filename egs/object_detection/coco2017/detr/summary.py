@@ -10,6 +10,29 @@ from train import get_parser
 from nets.backbone import build_backbone
 from nets.transformer import build_transformer
 
+
+def get_parameter_number(model):
+    total_num = sum(p.numel() for p in model.parameters())
+    trainable_num = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return {'Total': total_num, 'Trainable': trainable_num}
+
+## use the third tool to compute the parameter
+
+from torchstat import stat
+import torchvision.models as models
+model = models.alexnet()
+stat(model, (3, 224, 224))
+"""
+output:
+===================================
+Total params: 61,264,904
+-----------------------------------
+Total memory: 4.98 MB
+Total MAdd: 1.72 GMAdd
+Total FLops: 862.36 MFlops
+Total MemR+W: 244.14 MB
+"""
+
 if __name__ == "__main__":
     input_shape     = [600, 600]
     num_classes     = 21

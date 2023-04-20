@@ -830,8 +830,12 @@ def run(rank, world_size, args):
         device = device,
         )
 
+    ## get the number of model's total parameter and the trainable parameter
+    total_num = sum(p.numel() for p in model.parameters())
+    trainable_num = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('number of params:', n_parameters)
+    print('total_number of params: {}, trainable_number of params: {}'.format(total_num, trainable_num))
 
     if params.start_epoch == 0 and params.backbone_weights_path is not None:
         print('Load weights {}.'.format(params.backbone_weights_path))

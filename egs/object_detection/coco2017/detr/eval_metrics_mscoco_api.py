@@ -61,6 +61,7 @@ predict_file = "detr/exp/detections_val_detr-resnet50_predict_results.json"
 gt_file = "detr/exp/detections_val_detr-resnet50_gt_results.json"
 
 if __name__ == "__main__":
+    # use the given ground-truth file for evaluation
     cocoGt = COCO(ann_file)           # 标注文件的路径及文件名，json文件形式
     cocoDt = cocoGt.loadRes(predict_file)   # 自己的生成的结果的路径及文件名，json文件形式
     cocoEval = COCOeval(cocoGt, cocoDt, "bbox") # annotype: segm, bbox, keypoints
@@ -68,7 +69,7 @@ if __name__ == "__main__":
     cocoEval.accumulate()
     cocoEval.summarize()
 
-       
+    # use the generated ground-truth json file for evaluation
     cocoGt = COCO(gt_file)
     cocoDt = cocoGt.loadRes(predict_file)   # 自己的生成的结果的路径及文件名，json文件形式
     cocoEval = COCOeval(cocoGt, cocoDt, "bbox") # annotype: segm, bbox, keypoints
