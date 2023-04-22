@@ -83,52 +83,6 @@ def plot_one_box(x, img, color=None, label=None, line_thickness=1):
         cv2.rectangle(img, c1, c2, color, -1, cv2.LINE_AA)  # filled
         cv2.putText(img, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
 
-def get_FPS(self, image, test_interval):
-    #---------------------------------------------------#
-    #   计算输入图片的高和宽
-    #---------------------------------------------------#
-    image_shape = np.array(np.shape(image)[0:2])
-    input_shape = get_new_img_size(image_shape[0], image_shape[1])
-    #---------------------------------------------------------#
-    #   在这里将图像转换成RGB图像，防止灰度图在预测时报错。
-    #   代码仅仅支持RGB图像的预测，所有其它类型的图像都会转化成RGB
-    #---------------------------------------------------------#
-    image       = cvtColor(image)
-    
-    #---------------------------------------------------------#
-    #   给原图像进行resize，resize到短边为600的大小上
-    #---------------------------------------------------------#
-    image_data  = resize_image(image, [input_shape[1], input_shape[0]])
-    #---------------------------------------------------------#
-    #   添加上batch_size维度
-    #---------------------------------------------------------#
-    image_data  = np.expand_dims(np.transpose(preprocess_input(np.array(image_data, dtype='float32')), (2, 0, 1)), 0)
-
-    with torch.no_grad():
-        images = torch.from_numpy(image_data)
-    
-        images = images.to(self.device)
-
-        roi_cls_locs, roi_scores, rois, _ = self.net(images)
-        #-------------------------------------------------------------#
-        #   利用classifier的预测结果对建议框进行解码，获得预测框
-        #-------------------------------------------------------------#
-        results = self.bbox_util.forward(roi_cls_locs, roi_scores, rois, image_shape, input_shape, 
-                                                nms_iou = self.nms_iou, confidence = self.confidence)
-    t1 = time.time()
-    for _ in range(test_interval):
-        with torch.no_grad():
-            roi_cls_locs, roi_scores, rois, _ = self.net(images)
-            #-------------------------------------------------------------#
-            #   利用classifier的预测结果对建议框进行解码，获得预测框
-            #-------------------------------------------------------------#
-            results = self.bbox_util.forward(roi_cls_locs, roi_scores, rois, image_shape, input_shape, 
-                                                    nms_iou = self.nms_iou, confidence = self.confidence)
-            
-    t2 = time.time()
-    tact_time = (t2 - t1) / test_interval
-    return tact_time
-
 def main(args):
     device  = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
