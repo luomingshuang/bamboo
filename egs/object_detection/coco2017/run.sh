@@ -2,7 +2,7 @@ export CUDA_VISIBLE_DEVICES='0,1,2,3'
 ## with aux loss to accelerate training
 python detr/train.py \
     --coco-path ~/coco2017 \
-    --unfreeze-batch-size 4 \
+    --unfreeze-batch-size 16 \
     --freeze-train False \
     --separate-optimize True
 
