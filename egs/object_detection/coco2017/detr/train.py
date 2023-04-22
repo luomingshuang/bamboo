@@ -193,9 +193,10 @@ def get_parser():
     parser.add_argument(
         "--backbone-weights-path",
         type=str,
-        default="download/model_data/backbone_weights/resnet50-19c8e357.pth",
+        default=None,
         help="Path for the pretrained backbone weights file.",
         # When is None, the model doesn't load any pretrained backbone weights file.
+        # "download/model_data/backbone_weights/resnet50-19c8e357.pth"
     )
 
     parser.add_argument(
@@ -351,7 +352,7 @@ def get_parser():
         help="Relative classification weight of the no-object class"
     )
 
-    # learning rate and related parameters
+    # * learning rate and related parameters
     parser.add_argument(
         "--lr", 
         type=float,
@@ -616,7 +617,7 @@ def compute_loss(
 
     outputs = model(images)
 
-    loss_dict = []
+    loss_dict = {}
     losses = 0
     with torch.set_grad_enabled(is_training):
         # Losses: loss_ce, class_error, loss_bbox, loss_giou, cardinality_error
@@ -631,20 +632,18 @@ def compute_loss(
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
-        loss_dict["total_sum_loss"] = losses
 
-    assert loss_dict["loss_ce"].requires_grad == is_training
+    assert losses.requires_grad == is_training
 
     info = MetricsTracker()
     info["num_objects"] = num_objects
-    info["loss_ce"] = loss_dict["loss_ce"].detach().cpu().item()
-    info["loss_bbox"] = loss_dict["loss_bbox"].detach().cpu().item()
-    info["loss_giou"] = loss_dict["loss_giou"].detach().cpu().item()
-    info["total_sum_loss"] = loss_dict["total_sum_loss"].detach().cpu().item()
-    info["class_error"] = loss_dict["class_error"].detach().cpu().item()
-    info["cardinality_error"] = loss_dict["cardinality_error"].detach().cpu().item()
+    
+    for k in loss_dict.keys():
+        info[k] = loss_dict[k].detach().cpu().item()
 
-    return loss_dict, info
+    info["total_sum_loss"] = losses.detach().cpu().item()
+    
+    return losses, info
 
 
 def compute_validation_loss(
@@ -662,7 +661,7 @@ def compute_validation_loss(
     tot_loss = MetricsTracker()
 
     for batch_idx, batch in enumerate(valid_dl):
-        loss_dict, loss_info = compute_loss(
+        losses, loss_info = compute_loss(
             params=params,
             model=model,
             criterion=criterion,
@@ -670,12 +669,12 @@ def compute_validation_loss(
             is_training=False,
         )
 
-        assert loss_dict["total_sum_loss"].requires_grad is False
+        assert losses.requires_grad is False
 
         tot_loss = tot_loss + loss_info
 
     if world_size > 1:
-        tot_loss.reduce(loss_dict["total_sum_loss"].device)
+        tot_loss.reduce(losses.device)
 
     loss_value = tot_loss["total_sum_loss"] / tot_loss["num_objects"]
 
@@ -730,20 +729,19 @@ def train_one_epoch(
         params.batch_idx_train += 1
         batch_size = batch[0].tensors.size(0)
 
-        loss_dict, loss_info = compute_loss(
+        losses, loss_info = compute_loss(
             params=params,
             model=model,
             criterion=criterion,
             batch=batch,
             is_training=True,
         )
-        loss = loss_dict["total_sum_loss"]  ## optimize the total sum loss
-        
+    
         # summary stats.
         tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
 
         optimizer.zero_grad()
-        loss.backward()
+        losses.backward()
         if params.clip_max_norm > 0:
             clip_grad_norm_(model.parameters(), params.clip_max_norm)
         optimizer.step()
@@ -871,7 +869,7 @@ def run(rank, world_size, args):
     
     if args.separate_optimize and not params.freeze_train:
         print("Optimize the backbone and transformer separately with different lr")
-        [
+        param_dicts_separate = [
             {
                 "params": [p for n, p in model.named_parameters() if "backbone" not in n and p.requires_grad]
             },
@@ -884,8 +882,12 @@ def run(rank, world_size, args):
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
 
+    param_dicts = model.parameters()
+    if args.separate_optimize and not params.freeze_train:
+        param_dicts = param_dicts_separate
+
     optimizer = optim.AdamW(
-        model.parameters(),
+        param_dicts,
         lr=params.lr,
         weight_decay=params.weight_decay,
     )

@@ -181,14 +181,14 @@ def main(args):
             label = CLASSES[class_id]
             confidence = scores[i].max()
             text = f"{label} {confidence:.3f}"
-            print(text)
             image = np.array(image)
             plot_one_box(boxes[i], image, label=text)
             
         # On server, this imshow function can't be used.
         # cv2.imshow("images", cv2.cvtColor(image,cv2.COLOR_BGR2RGB))
-        cv2.waitKey()
-        image = Image.fromarray(image)
+        # cv2.waitKey()
+        if boxes.shape[0] > 0:
+            image = Image.fromarray(image)
         image.save(os.path.join(args.test_results_dir, image_item))
 
     ## test fps
