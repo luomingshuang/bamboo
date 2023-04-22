@@ -308,7 +308,7 @@ class MLP(nn.Module):
         return x
 
 
-def build_model(args, num_classes=20, device="cuda", aux_loss=False):
+def build_model(args, num_classes=20, device="cuda", aux_loss=True):
     # the `num_classes` naming here is somewhat misleading.
     # it indeed corresponds to `max_obj_id + 1`, where max_obj_id
     # is the maximum id for a class in your dataset. 
