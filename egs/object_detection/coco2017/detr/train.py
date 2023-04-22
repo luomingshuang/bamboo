@@ -943,10 +943,13 @@ def run(rank, world_size, args):
                 weight_decay=params.weight_decay,
             )
 
-            train_dl = DataLoader(train_dataset, shuffle = True, batch_size = batch_size, num_workers = params.num_workers, pin_memory=True,
-                                    drop_last=True, collate_fn=frcnn_dataset_collate)
-            valid_dl = DataLoader(valid_dataset, shuffle = True, batch_size = batch_size, num_workers = params.num_workers, pin_memory=True, 
-                                    drop_last=True, collate_fn=frcnn_dataset_collate)
+            batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, batch_size, drop_last=True)
+
+            train_dl = DataLoader(
+                train_dataset, batch_sampler=batch_sampler_train, num_workers = args.num_workers,  
+                pin_memory=True, collate_fn=utils.collate_fn)
+            valid_dl = DataLoader(valid_dataset, sampler=sampler_val, batch_size = batch_size, 
+                num_workers = args.num_workers, pin_memory=True, drop_last=False, collate_fn=utils.collate_fn)
 
             num_samples = len(train_dataset)
     
