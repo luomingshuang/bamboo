@@ -15,8 +15,6 @@ stop_stage=100
 #    - val2017
 #    - test2017
 #
-# You can download the dataset from the following url:
-# https://github.com/fundamentalvision/Deformable-DETR.git
 #       
 
 dl_dir=$PWD/download
@@ -51,7 +49,6 @@ if [ $stage -le -1 ] && [ $stop_stage -ge -1 ]; then
   # mv val2017 mscoco2017
   # mv test2017 mscoco2017
   # mv data/annotations mscoco2017
-  
 fi
 
 if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
@@ -59,7 +56,6 @@ if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
   # For this step, you should download some model data files for modeling.
   # You can download them as follows.
   #
-  
   [ ! -e $dl_dir/detr_pretrained_model ] && mkdir -p $dl_dir/detr_pretrained_model
 
   wget https://dl.fbaipublicfiles.com/detr/detr-r50-e632da11.pth
@@ -67,6 +63,6 @@ if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
 fi
 
 if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
-  log "Stage 1: train, val and eval_metrics"
+  log "Stage 1: train, test and eval_metrics"
   # please have a reference for run.sh
 fi
