@@ -26,7 +26,7 @@ from nets.transformer import build_transformer
 
 class DETR(nn.Module):
     """ This is the DETR module that performs object detection """
-    def __init__(self, backbone, transformer, num_classes, num_queries, aux_loss=False, device=None):
+    def __init__(self, backbone, transformer, num_classes, num_queries, aux_loss=True, device=None):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -308,7 +308,7 @@ class MLP(nn.Module):
         return x
 
 
-def build_model(args, num_classes=20, device="cuda", aux_loss=False):
+def build_model(args, num_classes=20, device="cuda"):
     # the `num_classes` naming here is somewhat misleading.
     # it indeed corresponds to `max_obj_id + 1`, where max_obj_id
     # is the maximum id for a class in your dataset. 
