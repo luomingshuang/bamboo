@@ -172,7 +172,8 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
 
 from torchvision.ops.boxes import batched_nms
 
-def filter_boxes(scores, boxes, confidence=0.7, apply_nms=True, iou=0.5):
+### You can choose confidence: the default value of confidence is 0.7
+def filter_boxes(scores, boxes, confidence=0.0, apply_nms=True, iou=0.5):
     keep = scores.max(-1).values > confidence
     scores, boxes = scores[keep], boxes[keep]
  
@@ -193,11 +194,14 @@ def viz(model, criterion, postprocessors, data_loader, base_ds, device, output_d
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
 
+    use_topk = True
     for batch_idx, (samples, targets) in enumerate(tqdm(data_loader)):
         if batch_idx >=20:
             break
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        top_k = len(targets[0]['boxes'])
+
         outputs = model(samples)
         probas = outputs['pred_logits'].softmax(-1)[0, :, :-1].cpu()
         predicted_boxes = outputs['pred_boxes'][0,].cpu()
@@ -216,14 +220,26 @@ def viz(model, criterion, postprocessors, data_loader, base_ds, device, output_d
         ax[0].set_title('Original Image')
 
         # Pred results
-        plot_prediction(
-            samples.tensors[0:1], 
-            scores, 
-            predicted_boxes, 
-            labels, 
-            ax[1], 
-            plot_prob=False
-        )
+        # if not control the number of labels
+        if not use_topk:
+            plot_prediction(
+                samples.tensors[0:1], 
+                scores, 
+                predicted_boxes, 
+                labels, 
+                ax[1], 
+                plot_prob=False
+            )
+        # if control the number of labels
+        if use_topk:
+            plot_prediction(
+                samples.tensors[0:1], 
+                scores[:top_k], 
+                predicted_boxes[:top_k], 
+                labels[:top_k], 
+                ax[1], 
+                plot_prob=False
+            )
         ax[1].set_title('Prediction (Ours)')
  
         # GT Results
