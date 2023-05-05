@@ -195,13 +195,14 @@ def viz(model, criterion, postprocessors, data_loader, base_ds, device, output_d
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
 
     use_topk = True
+
     for batch_idx, (samples, targets) in enumerate(tqdm(data_loader)):
         if batch_idx >=20:
             break
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         top_k = len(targets[0]['boxes'])
-
+        
         outputs = model(samples)
         probas = outputs['pred_logits'].softmax(-1)[0, :, :-1].cpu()
         predicted_boxes = outputs['pred_boxes'][0,].cpu()
