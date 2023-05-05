@@ -160,7 +160,6 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         stats['PQ_st'] = panoptic_res["Stuff"]
     return stats, coco_evaluator
 
-
 from torchvision.ops.boxes import batched_nms
 
 ### You can choose confidence: the default value of confidence is 0.7
@@ -186,6 +185,7 @@ def viz(model, criterion, postprocessors, data_loader, base_ds, device, output_d
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
 
     use_topk = True
+    
     for batch_idx, (samples, targets) in enumerate(tqdm(data_loader)):
         if batch_idx >=20:
             break
@@ -193,6 +193,7 @@ def viz(model, criterion, postprocessors, data_loader, base_ds, device, output_d
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         top_k = len(targets[0]['boxes'])
  
+
         # outputs = model(samples)
         # indices = outputs['pred_logits'][0].softmax(-1)[..., 1].sort(descending=True)[1][:top_k]
         # predictied_boxes = torch.stack([outputs['pred_boxes'][0][i] for i in indices])
