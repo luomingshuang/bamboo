@@ -1,11 +1,12 @@
 # ------------------------------------------------------------------------
-# OW-DETR: Open-world Detection Transformer
-# Akshita Gupta^, Sanath Narayan^, K J Joseph, Salman Khan, Fahad Shahbaz Khan, Mubarak Shah
-# https://arxiv.org/pdf/2112.01513.pdf
-# ------------------------------------------------------------------------
-# Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
+# Deformable DETR
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
+# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
+# Modified from DETR (https://github.com/facebookresearch/detr)
+# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+# ------------------------------------------------------------------------
+
 
 import os
 import logging
@@ -36,9 +37,7 @@ import util.misc as utils
 import datasets.samplers as samplers
 from util.metric_tracker import MetricsTracker
 from datasets import build_dataset, get_coco_api_from_dataset
-from datasets.coco import make_coco_transforms
 from datasets.data_prefetcher import data_prefetcher, to_cuda
-from datasets.torchvision_datasets.open_world import OWDetection
 from engine import evaluate, train_one_epoch, viz
 from models import build_model
 
@@ -71,7 +70,7 @@ def get_args_parser():
 
     # epochs and batch size, optimize methods
     parser.add_argument('--epochs', default=51, type=int)
-    parser.add_argument('--batch_size', default=4, type=int)
+    parser.add_argument('--batch_size', default=3, type=int)
     parser.add_argument('--start_epoch', default=0, type=int)
 
     # Variants of Deformable DETR
@@ -81,6 +80,8 @@ def get_args_parser():
     # Model parameters
     parser.add_argument('--frozen_weights', type=str, default=None,
                         help="Path to the pretrained model. If set, only the mask head will be trained")
+    parser.add_argument('--backbone', default='resnet50', type=str,
+                        help="Name of the convolutional backbone to use")  
     parser.add_argument('--dilation', action='store_true',
                         help="If true, we replace stride with dilation in the last convolutional block (DC5)")
     parser.add_argument('--position_embedding', default='sine', type=str, choices=('sine', 'learned'),
@@ -146,31 +147,14 @@ def get_args_parser():
     parser.add_argument('--viz', action='store_true')
     parser.add_argument('--eval_every', default=1, type=int)
     parser.add_argument('--num_workers', default=4, type=int)
+    parser.add_argument('--pretrain', default='', help='initialized from the pre-training model')
+    parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
 
     # distributed training parameters
     parser.add_argument('--distributed', type=bool, default=True, help='use distributed method for training or not')
     parser.add_argument('--world_size', type=int, default=1, help='the number of gpus for ddp training')
     parser.add_argument('--master_port', type=int, default=12345, help='master port to use for ddp training')
 
-    ## OWOD
-    parser.add_argument('--PREV_INTRODUCED_CLS', default=0, type=int)
-    parser.add_argument('--CUR_INTRODUCED_CLS', default=20, type=int)
-    parser.add_argument('--top_unk', default=5, type=int)
-    parser.add_argument('--unmatched_boxes', default=False, action='store_true')
-    parser.add_argument('--featdim', default=1024, type=int)
-    parser.add_argument('--pretrain', default='', help='initialized from the pre-training model')
-    parser.add_argument('--train_set', default='', help='training txt files')
-    parser.add_argument('--test_set', default='', help='testing txt files')
-    parser.add_argument('--NC_branch', default=False, action='store_true')
-    parser.add_argument('--nc_loss_coef', default=2, type=float)
-    parser.add_argument('--invalid_cls_logits', default=False, action='store_true', help='owod setting')
-    parser.add_argument('--nc_epoch', default=0, type=int)
-    parser.add_argument('--num_classes', default=81, type=int)
-    parser.add_argument('--backbone', default='resnet50', type=str, help="Name of the convolutional backbone to use")
-    parser.add_argument('--dataset', default='owod')
-    parser.add_argument('--data_root', default='data/OWDETR', type=str)
-    parser.add_argument('--bbox_thresh', default=0.3, type=float)
-    parser.add_argument('--split', default='owodetr', choices=['owod','owdetr'], help='dataset split')
     return parser
 
 
@@ -192,7 +176,7 @@ def get_params() -> AttributeDict:
             "batch_idx_train": 0,
             "log_interval": 10,
             "reset_interval": 200,
-            "valid_interval": 3000,
+            "valid_interval": 10, #3000,
             "save_checkpoint_interval": 5,
             "env_info": get_env_info(),
         }
@@ -250,9 +234,8 @@ def load_checkpoint_if_available(
         "best_train_loss",
         "best_valid_loss",
     ]
-    if not params.pretrain:
-        for k in keys:
-            params[k] = saved_params[k]
+    for k in keys:
+        params[k] = saved_params[k]
 
     return saved_params
 
@@ -342,12 +325,8 @@ def compute_loss(
         # Note: here, we don't talk about segmentation task, so there is no loss_masks
 
         outputs = model(samples)
-        loss_dict = criterion(samples, outputs, targets, params.cur_epoch)
+        loss_dict = criterion(outputs, targets)
         weight_dict = deepcopy(criterion.weight_dict)
-        if params.cur_epoch < params.nc_epoch:
-            for k,v in weight_dict.items():
-                if 'NC' in k:
-                    weight_dict[k] = 0
         
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
         # reduce losses over all GPUs for logging purposes
@@ -394,6 +373,7 @@ def compute_validation_loss(
     device = params.device
 
     for batch_idx, batch in enumerate(tqdm(valid_dl)):
+        if batch_idx >=20: break
         samples = batch[0].to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in batch[1]]
         batch = [samples, targets]
@@ -467,6 +447,7 @@ def train_one_epoch(
     batch = prefetcher.next()
 
     for batch_idx in range(len(train_dl)):
+        if batch_idx >=20: break
         params.batch_idx_train += 1
         batch_size = batch[0].tensors.size(0)
 
@@ -501,22 +482,22 @@ def train_one_epoch(
                 )
                 tot_loss.write_summary(tb_writer, "train/tot_", params.batch_idx_train)
 
-        # if batch_idx > 0 and batch_idx % params.valid_interval == 0:
-        #     valid_info = compute_validation_loss(
-        #         params=params,
-        #         model=model,
-        #         criterion=criterion,
-        #         valid_dl=valid_dl,
-        #         world_size=world_size,
-        #     )
-        #     model.train()
-        #     logging.info(f"Epoch {params.cur_epoch}, validation {valid_info}")
-        #     if tb_writer is not None:
-        #         valid_info.write_summary(
-        #             tb_writer,
-        #             "train/valid_",
-        #             params.batch_idx_train,
-        #         )
+        if batch_idx > 0 and batch_idx % params.valid_interval == 0:
+            valid_info = compute_validation_loss(
+                params=params,
+                model=model,
+                criterion=criterion,
+                valid_dl=valid_dl,
+                world_size=world_size,
+            )
+            model.train()
+            logging.info(f"Epoch {params.cur_epoch}, validation {valid_info}")
+            if tb_writer is not None:
+                valid_info.write_summary(
+                    tb_writer,
+                    "train/valid_",
+                    params.batch_idx_train,
+                )
         
         batch = prefetcher.next()
 
@@ -578,7 +559,8 @@ def run(rank, world_size, args):
 
     checkpoints = load_checkpoint_if_available(params=params, model=model)
 
-    dataset_train, dataset_val = get_datasets(args)
+    dataset_train = build_dataset(image_set='train', args=args)
+    dataset_val = build_dataset(image_set='val', args=args)
     
     if args.distributed and world_size > 1:
         sampler_train = DistributedSampler(dataset_train)
@@ -632,11 +614,11 @@ def run(rank, world_size, args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[rank])
         model_without_ddp = model.module
 
-    if args.dataset == "coco_panoptic":
+    if args.dataset_file == "coco_panoptic":
         # We also evaluate AP during panoptic training, on original coco DS
         coco_val = datasets.coco.build("val", args)
         base_ds = get_coco_api_from_dataset(coco_val)
-    elif args.dataset == "coco":
+    elif args.dataset_file == "coco":
         base_ds = get_coco_api_from_dataset(dataset_val)
     else:
         base_ds = dataset_val
@@ -664,7 +646,7 @@ def run(rank, world_size, args):
         model_without_ddp.load_state_dict(checkpoint["model"], strict=False)     
         if args.output_dir:
             if args.eval:
-                test_stats, coco_evaluator = evaluate(model_without_ddp, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir, args)
+                test_stats, coco_evaluator = evaluate(model_without_ddp, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir)
                 utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pt")
             if args.viz:
                 viz(model_without_ddp, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir)
@@ -707,9 +689,9 @@ def run(rank, world_size, args):
             rank=rank,
         )
 
-        if args.dataset in ['owod'] and epoch % args.eval_every == 0 and epoch > 0:
+        if args.output_dir and epoch % args.eval_every == 0:
             test_stats, coco_evaluator = evaluate(
-                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir, args
+                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
             )
             log_stats = {**{f'test_{k}': v for k, v in test_stats.items()},
                             'epoch': epoch,
@@ -719,15 +701,13 @@ def run(rank, world_size, args):
                 with (output_dir / "log_test.txt").open("a") as f:
                     f.write(json.dumps(log_stats) + "\n")
 
-                if args.dataset in ['owod'] and epoch % args.eval_every == 0 and epoch > 0:
-                    # for evaluation logs
-                    if coco_evaluator is not None:
-                        (output_dir / 'eval').mkdir(exist_ok=True)
-                        if "bbox" in coco_evaluator.coco_eval:
-                            filenames = ['latest.pt']
-                            for name in filenames:
-                                torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                        output_dir / "eval" / name)
+            if coco_evaluator is not None:
+                (output_dir / 'eval').mkdir(exist_ok=True)
+                if "bbox" in coco_evaluator.coco_eval:
+                    filenames = ['latest.pt']
+                    for name in filenames:
+                        torch.save(coco_evaluator.coco_eval["bbox"].eval,
+                                output_dir / "eval" / name)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -739,33 +719,13 @@ def run(rank, world_size, args):
         torch.distributed.barrier()
         cleanup_dist()
 
-def get_datasets(args):
-    print(args.dataset)
-    if args.dataset == 'owod':
-        train_set = args.train_set
-        test_set = args.test_set
-        dataset_train = OWDetection(args, args.owod_path, ["2007"], image_sets=[args.train_set], transforms=make_coco_transforms(args.train_set))
-        dataset_val = OWDetection(args, args.owod_path, ["2007"], image_sets=[args.test_set], transforms=make_coco_transforms(args.test_set))
-    else:
-        raise ValueError("Wrong dataset name")
-
-    print(args.dataset)
-    print(args.train_set)
-    print(args.test_set)
-    print(dataset_train)
-    print(dataset_val)
-
-    return dataset_train, dataset_val
-
-
-def set_dataset_path(args):
-    args.owod_path = os.path.join(args.data_root, 'VOC2007')
-
 
 def main():
-    parser = argparse.ArgumentParser('OW-DETR training and evaluation script', parents=[get_args_parser()])
+    parser = argparse.ArgumentParser('Deformable-DETR training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
-    set_dataset_path(args)
+    
+    if args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     world_size = args.world_size
     assert world_size >= 1
